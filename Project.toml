@@ -1,6 +1,6 @@
 name = "HardwareLoopCore"
 uuid = "b7e1c2d3-4f56-4a78-9b01-23c4d5e6f708"
-version = "0.1.0"
+version = "1.0.0"
 authors = ["Soeren Schoenbrod <soeren.schoenbrod@juliahub.com> and contributors"]
 
 [deps]
