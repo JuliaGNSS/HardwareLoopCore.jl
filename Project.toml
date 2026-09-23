@@ -11,11 +11,6 @@ TrackingLoopFilters = "0814aff9-93cb-554c-9fff-9bf1cfdb5efa"
 TrackingLoops = "89eadfff-3a96-4166-8be0-4e8bed6efc30"
 Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
-[sources]
-# Unregistered as yet: taken from GitHub. Replace by registry versions once released.
-HardwareLoopProtocol = {url = "https://github.com/JuliaGNSS/HardwareLoopProtocol.jl"}
-TrackingLoops = {url = "https://github.com/JuliaGNSS/TrackingLoops.jl"}
-
 [compat]
 GNSSSignals = "4"
 HardwareLoopProtocol = "1"
