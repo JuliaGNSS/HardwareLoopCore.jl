@@ -4,7 +4,9 @@
 
 Releases are automated: every push to `main` runs semantic-release
 (`.github/workflows/Release.yml`), which derives the version bump, the
-changelog and the JuliaRegistrator call from the commit messages. Every
+changelog and the JuliaRegistrator call from the commit messages. The tag and
+the GitHub release are created by TagBot once the General registry has merged
+the registration. Every
 commit must follow [Conventional Commits](https://www.conventionalcommits.org):
 
 ```
