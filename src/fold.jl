@@ -31,7 +31,7 @@ function _emit_partial!(core::LoopCore, bank::ChannelBank, ch::Int)
     blocks_before = state.bit_buffer.prompt_accumulator_integrated_code_blocks
     bits_before = length(get_soft_bits(state))
     found_before = has_bit_or_secondary_code_been_found(state)
-    noise_density = band.noise_density / Hz
+    noise_density = _noise_density(bank.template, band.noise_density / Hz)
     state, prompt, filtered, integrated_code_blocks = apply_record(
         state,
         signal,
@@ -119,6 +119,14 @@ function _emit_partial!(core::LoopCore, bank::ChannelBank, ch::Int)
     T.partial_first[ch] = false
     nothing
 end
+
+# The noise floor in the shape the estimators combine with the antenna weights:
+# the density for one antenna, the covariance `N₀·I` for `M` — the noise
+# reference measures one density, so the antennas are taken to see equal,
+# uncorrelated noise.
+@inline _noise_density(::AbstractCorrelator{1}, density) = density
+@inline _noise_density(::AbstractCorrelator{M}, density) where {M} =
+    SMatrix{M,M}(ntuple(i -> (i - 1) % (M + 1) == 0 ? density : zero(density), Val(M * M)))
 
 # The correlator's taps as the fixed tuple a `TapsEvent` carries.
 @inline function _pack_correlator_taps(correlator::AbstractCorrelator{1})

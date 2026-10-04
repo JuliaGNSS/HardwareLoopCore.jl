@@ -312,8 +312,9 @@ end
 
 # ── One record in ────────────────────────────────────────────────────────────
 
-# Pool one noise-reference record: every meaningful tap is an independent look
-# at the floor, and `Σ|b|²` over them is what the density is measured from. The
+# Pool one noise-reference record: every meaningful tap of every antenna is an
+# independent look at the floor, and `Σ|b|²` over them is what the per-antenna
+# density is measured from. The
 # taps are brought onto the satellites' scale first (the replica and code
 # amplitudes the arm declared, squared): a density left at the device's own
 # amplitude would be off every C/N₀ by that factor squared.
@@ -326,7 +327,7 @@ function _pool_noise_record!(core::LoopCore, ch::Int, band::Int, record::DeviceR
     end
     scale = core.channels.scale[ch]
     b.noise_power += power / (scale * scale)
-    b.noise_looks += Int(record.num_taps)
+    b.noise_looks += n
     b.noise_samples_per_look = Int(record.integrated_samples)
     nothing
 end
