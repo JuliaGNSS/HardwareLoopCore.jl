@@ -62,10 +62,19 @@ correlate_chunk!(dev, samples)
 service_pass!(core; wait_ms = 0)
 ```
 
-The core is not tied to one signal: it tracks any GNSSSignals signal that
-TrackingLoops supports (GPS, Galileo and BeiDou), mixed across channels. The
-documentation lists the [current limitations](https://JuliaGNSS.github.io/HardwareLoopCore.jl/stable/#Signals-and-limitations)
-and explains why this package is separate from HardwareLoopProtocol.
+## Limitations
+
+- The signal types, the antenna count and the hardware channel count are fixed
+  when the core is constructed.
+- One estimator: TrackingLoops' `NCOReferencedPLLAndDLL` with its default loop
+  filters. Its bandwidths are set loop-wide; the per-arm bandwidths of an
+  `ArmCommand` are not applied yet.
+- A record carries at most five taps and ten tap × antenna values.
+- With several antennas there is no beamforming, and the antennas are taken to
+  see equal, uncorrelated noise.
+- C/N₀ needs a noise reference: one hardware channel per band.
+- `overflowed_channels!` is part of the driver API but not read by the core yet.
+- `SimulatedDevice` is for tests: one band, one antenna, not real-time.
 
 See the [documentation](https://JuliaGNSS.github.io/HardwareLoopCore.jl/stable)
 for a closed-loop walk-through, the driver contract, and the API reference.

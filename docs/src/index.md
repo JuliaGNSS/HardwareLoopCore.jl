@@ -50,9 +50,8 @@ the contract small and stable:
 
 ## Signals and limitations
 
-The core is not tied to GPS L1 C/A. It tracks any signal type that GNSSSignals
-defines and TrackingLoops has a default correlator and bit/secondary-code
-synchronisation for (GPS L1 C/A, L1C, L2C, L5; Galileo E1, E5a, E5b, E6;
+The core tracks any signal type that GNSSSignals defines and TrackingLoops has
+a default correlator and bit/secondary-code synchronisation for (GPS L1 C/A, L1C, L2C, L5; Galileo E1, E5a, E5b, E6;
 BeiDou B1I, B1C, B2a, B2b, B3I). A loop serves the signal types passed to
 [`LoopCore`](@ref) at construction, mixed freely across channels. Overlay
 (secondary) codes are removed once their phase is known, code periods longer
