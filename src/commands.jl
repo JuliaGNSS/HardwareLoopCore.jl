@@ -20,9 +20,11 @@ function _publish_status!(core::LoopCore, channel::Int, sample::Int64, status::S
     nothing
 end
 
+# A command for no channel, or for one this loop does not have, is answered on
+# the loop-wide channel.
 _reject!(core::LoopCore, tag::CommandTag, reason) = _publish_status!(
     core,
-    Int(tag.channel) == 0 ? LOOP_STATUS_CHANNEL : Int(tag.channel),
+    1 <= Int(tag.channel) <= core.num_channels ? Int(tag.channel) : LOOP_STATUS_CHANNEL,
     sample_count(core.driver, 1),
     StatusEvent(HardwareLoopProtocol.STATUS_ARM_REJECTED, reason, sample_count(core.driver, 1), tag.sequence),
 )
