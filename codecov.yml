@@ -1,0 +1,10 @@
+coverage:
+  status:
+    project:
+      default:
+        # Do not let the total coverage drop by more than a rounding error.
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        target: 80%
