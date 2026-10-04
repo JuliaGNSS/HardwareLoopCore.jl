@@ -320,7 +320,7 @@ function LoopCore(
         ),
     )
     caps.num_ants == N ||
-        throw(ArgumentError("the driver reads \$(caps.num_ants) antenna block(s) per record but the core was built for \$N"))
+        throw(ArgumentError("the driver reads $(caps.num_ants) antenna block(s) per record but the core was built for $N"))
     banks = map(signal -> ChannelBank(signal, n, num_ants), signals)
     template = init_estimator_state(estimator, first(signals), 0.0Hz, 0.0Hz)
     pending = DeviceRecord[]
