@@ -2,8 +2,7 @@
 # The driver API: what the loop core asks of a hardware correlator. Concrete
 # and statically dispatched — the driver is a type parameter of the core — so
 # the loop process compiles to direct calls with nothing left to resolve at run
-# time. GNSSM2SDR's driver half and the simulated FPGA in `simulated_device.jl`
-# implement it.
+# time. The simulated FPGA in `simulated_device.jl` implements it.
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
@@ -38,7 +37,8 @@ abstract type AbstractLoopDriver end
 const MAX_RECORD_TAPS = HardwareLoopProtocol.MAX_TAP_VALUES
 
 """
-    DeviceRecord
+    DeviceRecord(channel, prn, sample_index, integrated_samples, taps, num_taps;
+                 band = 1, num_ants = 1, code_phase = NaN)
 
 One correlator dump, or one epoch strobe, as the driver hands it to the core.
 `isbits`, so the ingest buffer is one flat vector.
@@ -96,7 +96,13 @@ function DeviceRecord(
     )
 end
 
-"An epoch strobe: a timebase marker on `band`'s counter."
+"""
+    strobe_record(sample_index; band = 1) -> DeviceRecord
+
+An epoch strobe: a timebase marker at `sample_index` on `band`'s counter. A
+driver hands one to the core wherever the device strobes its epoch clock; the
+core uses it to advance its epoch clock and folds nothing from it.
+"""
 strobe_record(sample_index::Integer; band::Integer = 1) = DeviceRecord(
     RECORD_STROBE_CHANNEL,
     0,
@@ -107,9 +113,21 @@ strobe_record(sample_index::Integer; band::Integer = 1) = DeviceRecord(
     band,
 )
 
+"""
+    is_strobe(record::DeviceRecord) -> Bool
+
+Whether `record` is an epoch strobe ([`strobe_record`](@ref)) rather than a
+correlator dump.
+"""
 is_strobe(record::DeviceRecord) = record.channel == RECORD_STROBE_CHANNEL
 
-# Pack tap values into the fixed tuple, latest first, zeros beyond `n`.
+"""
+    pack_taps(values::AbstractVector{<:Complex}) -> NTuple{MAX_RECORD_TAPS,ComplexF64}
+
+Pack tap values into the fixed tuple a [`DeviceRecord`](@ref) carries, in the
+order given (latest tap first, antenna-major), zero beyond `length(values)`.
+Throws an `ArgumentError` for more than [`MAX_RECORD_TAPS`](@ref) values.
+"""
 function pack_taps(values::AbstractVector{<:Complex})
     n = length(values)
     n <= MAX_RECORD_TAPS || throw(ArgumentError("more than $MAX_RECORD_TAPS tap values"))
@@ -148,7 +166,22 @@ struct ArmOutcome
     reason::UInt32
 end
 
+"""
+    ARM_ACCEPTED
+
+The [`ArmOutcome`](@ref) a driver's [`arm!`](@ref) returns when it accepted the
+arm. The core then waits for [`assignment_start`](@ref) to confirm it.
+"""
 const ARM_ACCEPTED = ArmOutcome(true, HardwareLoopProtocol.REJECT_NONE)
+
+"""
+    arm_rejected(reason) -> ArmOutcome
+
+The [`ArmOutcome`](@ref) of a refused arm. `reason` is one of
+`HardwareLoopProtocol`'s `REJECT_*` codes (e.g. `REJECT_UNSUPPORTED_SIGNAL`,
+`REJECT_BAD_CONFIG`); the core forwards it to the receiver in a
+`STATUS_ARM_REJECTED` status event and frees the channel.
+"""
 arm_rejected(reason) = ArmOutcome(false, UInt32(reason))
 
 """
@@ -164,15 +197,92 @@ struct DriverCapabilities
     bands::Vector{BandEntry}
 end
 
+"""
+    read_records!(driver, records::Vector{DeviceRecord}) -> Int
+
+Append every record the device has produced since the last call — correlator
+dumps and epoch strobes, in the order the device produced them — to `records`
+and return how many were appended. Must never block, and should not allocate:
+the core passes the same vector, emptied and with its capacity reserved, on
+every pass. Required for every [`AbstractLoopDriver`](@ref).
+"""
 function read_records! end
+
+"""
+    write_word!(driver, channel, carrier_hz::Float64, code_hz::Float64) -> Bool
+
+Commit a carrier and a code NCO word (the Dopplers, in Hz) on `channel`,
+effective on the device's next sample. Return `false` if the device refused the
+word (e.g. the channel is not running), which the core counts as rejected.
+Required for every [`AbstractLoopDriver`](@ref).
+"""
 function write_word! end
+
+"""
+    arm!(driver, channel, spec::ArmSpec) -> ArmOutcome
+
+Load the replica [`ArmSpec`](@ref) describes onto `channel` and start
+correlating, replacing whatever the channel ran before. Return
+[`ARM_ACCEPTED`](@ref), and report the sample the assignment took effect at
+through [`assignment_start`](@ref) once it has; or return
+[`arm_rejected`](@ref)`(reason)` if the device cannot serve it. Required for
+every [`AbstractLoopDriver`](@ref).
+"""
 function arm! end
+
+"""
+    release!(driver, channel)
+
+Stop `channel` correlating. Records the device has already produced for it may
+still arrive; the core drops them. Required for every
+[`AbstractLoopDriver`](@ref).
+"""
 function release! end
+
+"""
+    assignment_start(driver, channel) -> Int64
+
+The device sample (on the channel's band counter) the channel's current
+assignment took effect at. While an accepted arm is still waiting to take
+effect, `typemax(Int64)`; once the device has given up on it, `typemin(Int64)`,
+and the core then rejects the arm and releases the channel. Records whose
+integration began before this sample are dropped as stale. Required for every
+[`AbstractLoopDriver`](@ref).
+"""
 function assignment_start end
+
+"""
+    sample_count(driver, band::Integer) -> Int64
+
+The device's free-running sample counter for `band` (an index into
+[`DriverCapabilities`](@ref)`.bands`), read now. Band 1 is the reference band:
+its counter is the receiver timebase the epoch clock runs on. Required for
+every [`AbstractLoopDriver`](@ref).
+"""
 function sample_count end
+
+"""
+    driver_capabilities(driver) -> DriverCapabilities
+
+The device's fixed limits ([`DriverCapabilities`](@ref)), read once when the
+[`LoopCore`](@ref) is built. Required for every [`AbstractLoopDriver`](@ref).
+"""
 function driver_capabilities end
 
-"Block until the device may have records, at most `timeout_ms`; the default returns at once."
+"""
+    wait_records(driver, timeout_ms::Integer)
+
+Block until the device may have records, for at most `timeout_ms` milliseconds
+— e.g. on a DMA interrupt. Optional: the default returns at once, so the
+service loop polls.
+"""
 wait_records(::AbstractLoopDriver, timeout_ms::Integer) = nothing
-"Channels the device reports having lost records on since the last call (a bitmap or count), cleared on read."
+
+"""
+    overflowed_channels!(driver) -> Integer
+
+The channels the device reports having lost records on since the last call (a
+bitmap or a count, as the device keeps it), cleared on read. Optional: the
+default reports none (`0`).
+"""
 overflowed_channels!(::AbstractLoopDriver) = 0
