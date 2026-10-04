@@ -167,6 +167,7 @@ struct ChannelTable
     arm_sequence::Vector{UInt64}     # the command sequence the arm answers
     want_taps::Vector{Bool}
     driver_channel::Vector{Int}      # a passenger's driver channel (0 for a driver)
+    carrier_phase_offset::Vector{Float64}  # the signal's carrier-phase offset, radians
     word_dirty::Vector{Bool}         # the loop stepped since the last word was scheduled
     scale::Vector{Float64}           # accumulator amplitude divisor (replica × code amplitude ratio)
     sampling_freq::Vector{Float64}   # the channel's band rate, Hz
@@ -216,7 +217,7 @@ end
 function ChannelTable(n::Integer, estimator_template)
     ChannelTable(
         fill(false, n), fill(false, n), zeros(Int, n), ones(Int, n), zeros(Int, n), zeros(Int, n),
-        [FixedName() for _ = 1:n], zeros(UInt64, n), fill(false, n), zeros(Int, n), fill(false, n), ones(Float64, n), zeros(Float64, n),
+        [FixedName() for _ = 1:n], zeros(UInt64, n), fill(false, n), zeros(Int, n), zeros(Float64, n), fill(false, n), ones(Float64, n), zeros(Float64, n),
         [estimator_template for _ = 1:n], zeros(Float64, n), zeros(Float64, n),
         [NCOTimeline() for _ = 1:n], fill(typemin(Int64), n), zeros(Float64, n), zeros(Float64, n),
         fill(typemin(Int64), n), fill(typemin(Int64), n), fill(typemin(Int64), n), fill(NaN, n),
