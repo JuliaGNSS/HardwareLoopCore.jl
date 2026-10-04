@@ -101,8 +101,6 @@ function ChannelBank(signal::AbstractGNSSSignal, num_channels::Integer, num_ants
     )
 end
 
-bank_signal_id(bank::ChannelBank) = get_signal_id(bank.signal)
-
 """
     BandState
 
@@ -372,25 +370,6 @@ end
 end
 @inline with_bank(f::F, core::LoopCore, channel::Integer, args::Vararg{Any,N}) where {F,N} =
     _with_bank(f, core.banks, core.channels.bank[channel], 1, args...)
-
-# Which bank serves a signal id, or 0 for none.
-function bank_index(core::LoopCore, signal_id::Symbol)
-    _bank_index(core.banks, signal_id, 1)
-end
-_bank_index(::Tuple{}, ::Symbol, ::Int) = 0
-_bank_index(banks::Tuple, signal_id::Symbol, k::Int) =
-    bank_signal_id(first(banks)) === signal_id ? k : _bank_index(Base.tail(banks), signal_id, k + 1)
-
-# Which band serves a band id, or 0.
-function band_index(core::LoopCore, band_id::Symbol)
-    for (i, band) in enumerate(core.bands)
-        Symbol(band.entry.band_id) === band_id && return i
-    end
-    0
-end
-
-# The reference band's rate: the receiver timebase.
-reference_sampling_frequency(core::LoopCore) = first(core.bands).entry.sampling_freq_hz
 
 # One of a channel's device samples on the reference timebase, and back.
 @inline _to_reference(core::LoopCore, band::Int, sample) =

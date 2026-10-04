@@ -80,7 +80,6 @@ function _emit_partial!(core::LoopCore, bank::ChannelBank, ch::Int)
     )
     core.events_published += 1
     if core.config.publish_taps || T.want_taps[ch]
-        taps = get_accumulators(filtered)
         publish!(
             ring,
             EventTag(HardwareLoopProtocol.EVENT_TAPS, ch, sample_end; band = T.band[ch], prn = T.prn[ch],
