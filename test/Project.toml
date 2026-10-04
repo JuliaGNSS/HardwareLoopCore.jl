@@ -10,3 +10,12 @@ Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [sources]
 HardwareLoopCore = {path = ".."}
+
+[compat]
+GNSSSignals = "4"
+HardwareLoopProtocol = "1"
+Random = "1"
+StaticArrays = "1"
+Test = "1"
+TrackingLoops = "1"
+Unitful = "1"
