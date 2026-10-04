@@ -96,6 +96,7 @@ function _arm_in_bank!(bank::ChannelBank, core::LoopCore, ch::Int, cmd::ArmComma
     bank.states[ch] = reset_signal_state(bank.states[ch])
     bank.partial[ch] = zero(bank.template)
     T.scale[ch] = cmd.replica_amplitude * cmd.code_amplitude / Float64(get_code_amplitude(signal))
+    T.carrier_phase_offset[ch] = Float64(get_carrier_phase_offset(signal))
     T.secondary_wipe[ch] =
         get_secondary_code_length(signal) > 1 &&
         cmd.secondary_code_mode == HardwareLoopProtocol.SECONDARY_PRIMARY_ONLY

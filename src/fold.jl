@@ -13,6 +13,16 @@
     max(now_reference, core.latest_sample_index) + core.config.commit_lead_samples
 end
 
+# The carrier-phase offset of the signal whose estimator steers the channel's
+# carrier: a passenger's bit-buffer prompt is de-rotated against its driver's
+# (the data half of a pilot/data pair may sit in quadrature to the pilot).
+@inline function _driver_carrier_phase_offset(core::LoopCore, ch::Int)
+    T = core.channels
+    driver = T.signal_index[ch] >= 2 ? T.driver_channel[ch] : 0
+    (driver == 0 || !T.armed[driver]) && return T.carrier_phase_offset[ch]
+    T.carrier_phase_offset[driver]
+end
+
 # Hand the channel's part-accumulated record to the loop and start a fresh one.
 # This is where the estimator steps, the events are published and the word to
 # be scheduled is refreshed. A no-op when nothing is accumulated.
@@ -40,6 +50,7 @@ function _emit_partial!(core::LoopCore, bank::ChannelBank, ch::Int)
         fs,
         noise_density,
         band.noise_density_ready,
+        _driver_carrier_phase_offset(core, ch),
     )
     bank.states[ch] = state
     # The loop: every record the driver component completes, unless this epoch
