@@ -1,19 +1,23 @@
 """
     HardwareLoopCore
 
-The engine of a hardware correlator's loop process
-(GNSSReceiver.jl, `docs/plans/2026-09-22-loop-process.md`): the driver API a
-device implements (`AbstractLoopDriver`), the per-channel state and the epoch
-fold that turn device records into loop steps ([`LoopCore`](@ref),
-[`service_pass!`](@ref)), the commands it executes and the events it publishes
-into a `HardwareLoopProtocol` segment, and the simulated FPGA that is its first
-driver ([`SimulatedDevice`](@ref)).
+The engine of a hardware correlator's loop process: the dedicated,
+allocation-free process that closes the tracking loops of an FPGA correlator.
+It reads correlator records from a device, folds them epoch by epoch into
+`TrackingLoops`' loop arithmetic, writes the resulting NCO words back to the
+device, and publishes everything a receiver needs into a `HardwareLoopProtocol`
+segment.
+
+  - [`AbstractLoopDriver`](@ref) — the driver API a device implements.
+  - [`LoopCore`](@ref) and [`service_pass!`](@ref) — the per-channel state and
+    the epoch fold that turn device records into loop steps, the commands the
+    core executes and the events it publishes.
+  - [`SimulatedDevice`](@ref) — a software correlator behind the driver API, for
+    tests and for trying the core without hardware.
 
 The per-record arithmetic — discriminators, loop filters, the bit buffer, the
 C/N₀ estimators, the delay-aware estimator and its NCO timelines — is
-`TrackingLoops`', shared with Tracking.jl's software receiver; this package is
-what a vendor's loop executable (e.g. GNSSM2SDR's `M2SDRLoop`) plugs its driver
-into. Warm service passes allocate nothing (`test/core.jl`).
+`TrackingLoops`'. Warm service passes allocate nothing.
 """
 module HardwareLoopCore
 

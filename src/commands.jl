@@ -278,8 +278,16 @@ function handle_commands!(core::LoopCore)
     handled
 end
 
-# Publish "armed at device sample S" for every arm the device has confirmed
-# since the last pass.
+"""
+    confirm_arms!(core)
+
+Publish a `STATUS_ARMED` status event, stamped with the device sample the
+assignment took effect at, for every arm the device has confirmed
+([`assignment_start`](@ref)) since the last pass. From then on the channel's
+records are believed. An arm the device gave up on (`typemin(Int64)`) is
+answered with `STATUS_ARM_REJECTED` (`REJECT_DEVICE_ERROR`) and the channel is
+released.
+"""
 function confirm_arms!(core::LoopCore)
     T = core.channels
     for ch = 1:core.num_channels
@@ -342,6 +350,15 @@ function _template_tap_shifts(template::AbstractCorrelator, sampling_freq_hz::Fl
     ntuple(i -> i <= length(shifts) ? Int32(shifts[i]) : Int32(0), Val(5))
 end
 
+"""
+    rearm_noise_references!(core)
+
+Re-arm every band's noise reference that has served
+[`LoopConfig`](@ref)`.noise_rearm_epochs` epochs onto a fresh decoy: the next
+PRN of its signal, a pseudo-random code phase and a carrier offset within
+±5 kHz, so a chance alignment with a live satellite spoils one observation in
+the noise window rather than the window.
+"""
 function rearm_noise_references!(core::LoopCore)
     for (band_index, b) in enumerate(core.bands)
         ch = b.noise_channel

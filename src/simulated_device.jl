@@ -1,6 +1,6 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # A simulated hardware correlator behind the driver API: the software stand-in
-# for the LiteX-M2SDR gateware, ported from GNSSReceiver.jl's test/simulated_fpga.jl.
+# for an FPGA correlator's gateware.
 # It correlates the samples it is handed with the replicas its channels hold,
 # cuts a record per primary code period (and, when told to, inside one), strobes
 # the epoch clock, and applies a committed word on the next sample. Nothing here
@@ -39,7 +39,9 @@ SimulatedChannel() = SimulatedChannel(
 """
     SimulatedDevice(signals::Tuple; sampling_freq, num_channels = 6, epoch_length,
                     dump_interval_samples = 0, handover_code_phase_error = 0.0,
+                    record_delay_samples = 0,
                     band_id = get_band_id(get_band(first(signals))))
+    SimulatedDevice(signal; kwargs...)
 
 A simulated hardware correlator for any of `signals` (one band, one antenna) at
 `sampling_freq` (Hz), fed raw samples through [`correlate_chunk!`](@ref) and

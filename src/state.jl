@@ -230,13 +230,26 @@ function ChannelTable(n::Integer, estimator_template)
 end
 
 """
-    LoopCore(driver, signals, segment; estimator, config, num_ants)
+    LoopCore(driver, signals, segment; estimator = NCOReferencedPLLAndDLL(),
+             config = nothing, max_pending_records = 65536, num_ants = NumAnts(1))
 
 The loop process's whole state: the driver, the signal banks, the channel
 table, the bands, the protocol segment it publishes into, the epoch clock and
 the counters. `signals` is the tuple of signal objects this loop can track
 (fixed at construction, so a trimmed binary knows every type it needs);
-`segment` is the `HardwareLoopProtocol.Segment` the receiver attaches to.
+`segment` is the `HardwareLoopProtocol.Segment` the receiver attaches to, with
+one event ring per hardware channel of the driver.
+
+  - `estimator` — the delay-aware `TrackingLoops` estimator every satellite
+    channel steps.
+  - `config` — a [`LoopConfig`](@ref); by default one whose epoch is a primary
+    code period of the first signal on the reference band.
+  - `max_pending_records` — the capacity of the ingest buffers; records past it
+    are dropped and counted.
+  - `num_ants` — the antenna blocks per record as a static `NumAnts`; must
+    match [`driver_capabilities`](@ref)`(driver).num_ants`.
+
+Drive it with [`service_pass!`](@ref) or [`run!`](@ref).
 """
 mutable struct LoopCore{D<:AbstractLoopDriver,Banks<:Tuple}
     const driver::D

@@ -1,10 +1,9 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Record ingest: from a device record to a folded loop record, per channel.
-# The accounting is the receiver-side link's (GNSSReceiver.jl's
-# `hardware_correlator.jl`), on a fixed channel table — the primary-code block
-# grid, record continuity, the overlay removal and the coherent accumulation —
-# minus the one rule the plan drops: a record is *not* cut where the NCO word
-# changed, because `mean_nco_word` already weights a change inside a record.
+# On a fixed channel table: the primary-code block grid, record continuity,
+# the overlay removal and the coherent accumulation. A record is *not* cut where
+# the NCO word changed, because `mean_nco_word` already weights a change inside
+# a record.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Records to correlators ───────────────────────────────────────────────────
@@ -320,9 +319,9 @@ end
 # amplitude would be off every C/N₀ by that factor squared.
 function _pool_noise_record!(core::LoopCore, ch::Int, band::Int, record::DeviceRecord)
     b = core.bands[band]
-    n = Int(record.num_taps) * max(1, Int(record.num_ants))
+    n = min(Int(record.num_taps) * max(1, Int(record.num_ants)), MAX_RECORD_TAPS)
     power = 0.0
-    @inbounds for i = 1:min(n, MAX_RECORD_TAPS)
+    @inbounds for i = 1:n
         power += abs2(record.taps[i])
     end
     scale = core.channels.scale[ch]

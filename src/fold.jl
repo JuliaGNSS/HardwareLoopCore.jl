@@ -174,7 +174,7 @@ end
 # ── Absolute code phase ──────────────────────────────────────────────────────
 
 # Advance the driver channel's absolute code phase to the fold boundary,
-# absorbing this epoch's replica anchor, exactly as the link did: dead-reckon on
+# absorbing this epoch's replica anchor: dead-reckon on
 # the channel's band counter, take the wrapped difference to the reported
 # replica phase, extrapolate the short hop to the boundary.
 function _advance_code_phase!(bank::ChannelBank, core::LoopCore, ch::Int, epoch_boundary::Int64)
@@ -489,7 +489,7 @@ function fold_closed_epochs!(core::LoopCore, now_reference::Int64)
             ingest_record!(core, record)
         end
         resize!(pending, keep)
-        # Per channel, in the order the link kept: phase bookkeeping, then the
+        # Per channel: phase bookkeeping, then the
         # restarts, anchors and the epoch state.
         for ch = 1:core.num_channels
             core.channels.armed[ch] && core.channels.confirmed[ch] || continue
