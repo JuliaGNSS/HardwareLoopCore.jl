@@ -11,3 +11,5 @@ HardwareLoopCore = {path = ".."}
 
 [compat]
 Documenter = "1"
+GNSSSignals = "4.1.2"
+Random = "<0.0.1, 1"
