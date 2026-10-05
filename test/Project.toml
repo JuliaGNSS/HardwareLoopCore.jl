@@ -8,8 +8,8 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 TrackingLoops = "89eadfff-3a96-4166-8be0-4e8bed6efc30"
 Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
-[sources]
-HardwareLoopCore = {path = ".."}
+[sources.HardwareLoopCore]
+path = ".."
 
 [compat]
 GNSSSignals = "4"
@@ -17,5 +17,5 @@ HardwareLoopProtocol = "1"
 Random = "1"
 StaticArrays = "1"
 Test = "1"
-TrackingLoops = "1"
+TrackingLoops = "1, 2"
 Unitful = "1"
