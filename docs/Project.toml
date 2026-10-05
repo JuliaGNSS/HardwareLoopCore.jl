@@ -6,8 +6,9 @@ HardwareLoopProtocol = "d08c7759-00c5-4da6-80f1-3e02eb36f3f0"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 TrackingLoops = "89eadfff-3a96-4166-8be0-4e8bed6efc30"
 
-[sources]
-HardwareLoopCore = {path = ".."}
+[sources.HardwareLoopCore]
+path = ".."
 
 [compat]
 Documenter = "1"
+HardwareLoopProtocol = "1"
