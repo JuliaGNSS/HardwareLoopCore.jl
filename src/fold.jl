@@ -23,6 +23,27 @@ end
     T.carrier_phase_offset[driver]
 end
 
+# Where a band's counter starts on the time grid every satellite shares, in the
+# band's samples. Band counters are taken to share an origin (`_to_reference`
+# scales them with no offset), so this is 0; a device whose bands start apart
+# would report the offset here.
+@inline _band_sample_offset(::LoopCore, ::Int) = 0
+
+# The replica's code phase (chips) at `sample_end`, for the record handed to the
+# estimator: the device's own report of the record's last dump where it gives
+# one, else the core's absolute code phase advanced to `sample_end`. NaN when
+# neither is known — before the first device report, which a device that never
+# reports one leaves on records cut on the code-block grid, where an estimator
+# reads NaN as a phase on the block boundary.
+function _record_code_phase(core::LoopCore, signal, ch::Int, sample_end::Int64)
+    T = core.channels
+    reported = T.partial_code_phase[ch]
+    isnan(reported) || return reported
+    reference = T.phase_ref_sample[ch]
+    reference == typemin(Int64) && return NaN
+    T.code_phase[ch] + (sample_end - reference) * _code_rate_hz(core, ch, signal) / T.sampling_freq[ch]
+end
+
 # Hand the channel's part-accumulated record to the loop and start a fresh one.
 # This is where the estimator steps, the events are published and the word to
 # be scheduled is refreshed. A no-op when nothing is accumulated.
@@ -34,7 +55,7 @@ function _emit_partial!(core::LoopCore, bank::ChannelBank, ch::Int)
     samples = T.partial_samples[ch]
     sample_end = T.partial_end[ch]
     correlator = _scale_accumulators(bank.partial[ch], T.scale[ch])
-    output = CorrelatorOutput(correlator, Int(samples), Int(sample_end))
+    output = CorrelatorOutput(correlator, Int(samples), Int(sample_end), _record_code_phase(core, signal, ch, sample_end))
     fs = T.sampling_freq[ch] * Hz
     state = bank.states[ch]
     previous_prompt = state.last_filtered_prompt
@@ -55,7 +76,9 @@ function _emit_partial!(core::LoopCore, bank::ChannelBank, ch::Int)
     bank.states[ch] = state
     # The loop: every record the driver component completes, unless this epoch
     # is being folded observation-only (a stale backlog), in which case the
-    # bits and the C/N₀ are kept current and the filter is left alone.
+    # bits and the C/N₀ are kept current and the filter is left alone. A vector
+    # loop is stepped regardless: its navigation engine drops a satellite that
+    # goes two navigation cycles without a record and falls back once it starves.
     flags = UInt32(0)
     band.noise_density_ready && (flags |= HardwareLoopProtocol.RECORD_HAS_CN0)
     _is_secondary_code_removed(core, ch) && (flags |= HardwareLoopProtocol.RECORD_OVERLAY_WIPED)
@@ -63,9 +86,13 @@ function _emit_partial!(core::LoopCore, bank::ChannelBank, ch::Int)
     timeline = T.timeline[ch]
     record_start = Int64(sample_end) - Int64(samples)
     applied_carrier, applied_code = mean_nco_word(timeline, record_start, Int64(sample_end))
-    if T.signal_index[ch] == 1 && !core.observation_only
-        record = LoopRecord(signal, filtered, previous_prompt, output, integrated_code_blocks, fs)
-        landing = _to_band(core, T.band[ch], core.current_landing)
+    if T.signal_index[ch] == 1 && (!core.observation_only || _is_vector(core))
+        offset = _band_sample_offset(core, T.band[ch])
+        record = LoopRecord(
+            signal, filtered, previous_prompt, output, integrated_code_blocks, fs;
+            prn = T.prn[ch], sample_offset = offset,
+        )
+        landing = _to_band(core, T.band[ch], core.current_landing) + offset
         est, carrier, code = step_loop(core.estimator, T.estimator[ch], record, timeline, landing)
         T.estimator[ch] = est
         T.carrier_doppler[ch] = ustrip(Hz, uconvert(Hz, carrier))
@@ -128,6 +155,7 @@ function _emit_partial!(core::LoopCore, bank::ChannelBank, ch::Int)
     T.partial_wraps[ch] = 0
     T.partial_end[ch] = typemin(Int64)
     T.partial_first[ch] = false
+    T.partial_code_phase[ch] = NaN
     nothing
 end
 
@@ -513,6 +541,7 @@ function fold_closed_epochs!(core::LoopCore, now_reference::Int64)
         _propagate_passenger_words!(core)
         _schedule_words!(core)
         _promote_applied_words!(core)
+        _publish_navigation!(core, core.estimator)
         core.next_epoch_boundary = boundary + epoch
         core.epochs_folded += 1
         folds += 1

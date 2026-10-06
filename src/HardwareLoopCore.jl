@@ -12,6 +12,9 @@ segment.
   - [`LoopCore`](@ref) and [`service_pass!`](@ref) — the per-channel state and
     the epoch fold that turn device records into loop steps, the commands the
     core executes and the events it publishes.
+  - Vector tracking: built with TrackingLoops' `VectorPLLAndDLL`, the core
+    runs every satellite on one navigation engine and publishes its solution
+    on the segment's loop-wide nav ring.
   - [`SimulatedDevice`](@ref) — a software correlator behind the driver API, for
     tests and for trying the core without hardware.
 
@@ -74,6 +77,7 @@ include("driver.jl")
 include("state.jl")
 include("ingest.jl")
 include("fold.jl")
+include("navigation.jl")
 include("commands.jl")
 include("service.jl")
 include("simulated_device.jl")

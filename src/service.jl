@@ -12,6 +12,7 @@ most `wait_ms` when nothing is pending, and never otherwise.
 """
 function service_pass!(core::LoopCore; wait_ms::Integer = 1)
     t0 = time_ns()
+    nav_cycle = core.last_nav_cycle
     wait_records(core.driver, wait_ms)
     taken = take_records!(core)
     now_reference = sample_count(core.driver, 1)
@@ -29,6 +30,7 @@ function service_pass!(core::LoopCore; wait_ms::Integer = 1)
     loop_heartbeat!(core.segment)
     elapsed = Int64(time_ns() - t0)
     elapsed > core.max_pass_ns && (core.max_pass_ns = elapsed)
+    core.last_nav_cycle != nav_cycle && elapsed > core.max_nav_cycle_ns && (core.max_nav_cycle_ns = elapsed)
     nothing
 end
 

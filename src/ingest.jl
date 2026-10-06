@@ -285,6 +285,7 @@ function _accumulate!(
         T.partial_wraps[ch] += span.wraps
     end
     T.partial_end[ch] = record.sample_index
+    T.partial_code_phase[ch] = record.code_phase
     long_enough =
         partial_primary ? T.partial_periods[ch] >= target - tolerance :
         T.partial_wraps[ch] >= max(1, floor(Int, target + tolerance))
@@ -306,6 +307,7 @@ end
     T.partial_wraps[ch] = 0
     T.partial_end[ch] = typemin(Int64)
     T.partial_first[ch] = false
+    T.partial_code_phase[ch] = NaN
     nothing
 end
 
