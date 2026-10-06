@@ -155,7 +155,8 @@ end
 end
 
 # Per-channel scalar state, all fixed-size vectors indexed by hardware channel.
-struct ChannelTable
+# `E` is the estimator's per-satellite state type.
+struct ChannelTable{E}
     # ── Occupancy ─────────────────────────────────────────────────────────────
     armed::Vector{Bool}
     confirmed::Vector{Bool}          # the device confirmed the arm (records are believed)
@@ -172,7 +173,7 @@ struct ChannelTable
     scale::Vector{Float64}           # accumulator amplitude divisor (replica × code amplitude ratio)
     sampling_freq::Vector{Float64}   # the channel's band rate, Hz
     # ── Loop state ────────────────────────────────────────────────────────────
-    estimator::Vector{SatNCOReferencedPLLAndDLL{ThirdOrderAssistedBilinearLF{typeof(1.0Hz),typeof(1.0Hz^2)},SecondOrderBilinearLF{typeof(1.0Hz)}}}
+    estimator::Vector{E}
     carrier_doppler::Vector{Float64}   # Hz, the loop's current command
     code_doppler::Vector{Float64}
     timeline::Vector{NCOTimeline}
@@ -195,6 +196,7 @@ struct ChannelTable
     partial_wraps::Vector{Int}
     partial_end::Vector{Int64}
     partial_first::Vector{Bool}      # the open record is the first after the arm
+    partial_code_phase::Vector{Float64}  # the device's code phase at `partial_end`, NaN if unreported
     pending_blocks::Vector{Int}      # blocks stepped since the bit buffer last advanced... (see fold)
     # ── Secondary (overlay) code removal ──────────────────────────────────────
     secondary_wipe::Vector{Bool}
@@ -214,15 +216,15 @@ struct ChannelTable
     stale_records::Vector{Int64}
 end
 
-function ChannelTable(n::Integer, estimator_template)
-    ChannelTable(
+function ChannelTable(n::Integer, estimator_template::E) where {E}
+    ChannelTable{E}(
         fill(false, n), fill(false, n), zeros(Int, n), ones(Int, n), zeros(Int, n), zeros(Int, n),
         [FixedName() for _ = 1:n], zeros(UInt64, n), fill(false, n), zeros(Int, n), zeros(Float64, n), fill(false, n), ones(Float64, n), zeros(Float64, n),
         [estimator_template for _ = 1:n], zeros(Float64, n), zeros(Float64, n),
         [NCOTimeline() for _ = 1:n], fill(typemin(Int64), n), zeros(Float64, n), zeros(Float64, n),
         fill(typemin(Int64), n), fill(typemin(Int64), n), fill(typemin(Int64), n), fill(NaN, n),
         zeros(Int64, n), zeros(Int64, n), zeros(Int64, n), fill(false, n),
-        zeros(Int64, n), zeros(Float64, n), zeros(Int, n), fill(typemin(Int64), n), fill(false, n), zeros(Int, n),
+        zeros(Int64, n), zeros(Float64, n), zeros(Int, n), fill(typemin(Int64), n), fill(false, n), fill(NaN, n), zeros(Int, n),
         fill(false, n), fill(-1, n), fill(typemin(Int64), n),
         zeros(Float64, n), fill(typemin(Int64), n), fill(typemin(Int64), n), fill(NaN, n), fill(false, n), zeros(Float64, n),
         zeros(Int64, n), zeros(Int64, n), zeros(Int64, n),
@@ -240,8 +242,14 @@ the counters. `signals` is the tuple of signal objects this loop can track
 `segment` is the `HardwareLoopProtocol.Segment` the receiver attaches to, with
 one event ring per hardware channel of the driver.
 
-  - `estimator` — the delay-aware `TrackingLoops` estimator every satellite
-    channel steps.
+  - `estimator` — the `TrackingLoops` estimator every satellite channel steps:
+    any whose `step_loop` takes an NCO timeline and a landing sample, by default
+    the delay-aware `NCOReferencedPLLAndDLL`. With a `VectorPLLAndDLL` the core
+    runs vector tracking: every satellite shares the estimator's navigation
+    engine, the segment's `navigation_mode` is `NAV_VECTOR` and each navigation
+    cycle is published on the segment's nav ring. Its `inner` must be an
+    `NCOReferencedPLLAndDLL`, its `config` a `VectorTracking` (not `nothing`),
+    and it must list every signal of `signals` that carries data.
   - `config` — a [`LoopConfig`](@ref); by default one whose epoch is a primary
     code period of the first signal on the reference band.
   - `max_pending_records` — the capacity of the ingest buffers; records past it
@@ -251,14 +259,17 @@ one event ring per hardware channel of the driver.
 
 Drive it with [`service_pass!`](@ref) or [`run!`](@ref).
 """
-mutable struct LoopCore{D<:AbstractLoopDriver,Banks<:Tuple}
+mutable struct LoopCore{D<:AbstractLoopDriver,Banks<:Tuple,E<:AbstractDopplerEstimator,CT<:ChannelTable}
     const driver::D
     const banks::Banks
-    const channels::ChannelTable
+    const channels::CT
     const bands::Vector{BandState}
     const segment::Segment
     const config::LoopConfig
-    const estimator::NCOReferencedPLLAndDLL{SecondOrderBilinearLF}
+    const estimator::E
+    # Per bank, whether a vector-tracking estimator lists its signal: only those
+    # may be armed as drivers in vector mode.
+    const vector_banks::Vector{Bool}
     const num_channels::Int
     const num_ants::Int
     # Records read from the driver and not yet folded (they belong to an epoch
@@ -291,6 +302,12 @@ mutable struct LoopCore{D<:AbstractLoopDriver,Banks<:Tuple}
     words_late::Int64
     words_rejected::Int64
     max_pass_ns::Int64
+    # Navigation (vector mode): the latest cycle published, how many nav events
+    # were, and the longest pass that published a cycle (the cycle itself runs
+    # inside the `step_loop` of one record).
+    last_nav_cycle::Int
+    nav_events_published::Int64
+    max_nav_cycle_ns::Int64
     # Record age at the fold — the device counter read at the start of the pass
     # minus the newest record's end — is the record-to-word latency, since the
     # words are committed in the same pass. Histogram over `LATENCY_EDGES_US`
@@ -313,7 +330,7 @@ function LoopCore(
     driver::AbstractLoopDriver,
     signals::Tuple{AbstractGNSSSignal,Vararg{AbstractGNSSSignal}},
     segment::Segment;
-    estimator::NCOReferencedPLLAndDLL = NCOReferencedPLLAndDLL(),
+    estimator::AbstractDopplerEstimator = NCOReferencedPLLAndDLL(),
     config::Union{Nothing,LoopConfig} = nothing,
     max_pending_records::Integer = 1 << 16,
     # Antenna blocks per record, as a static count: the banks' correlator
@@ -335,12 +352,14 @@ function LoopCore(
     )
     caps.num_ants == N ||
         throw(ArgumentError("the driver reads $(caps.num_ants) antenna block(s) per record but the core was built for $N"))
+    vector_banks = _check_estimator(estimator, signals)
     banks = map(signal -> ChannelBank(signal, n, num_ants), signals)
     template = init_estimator_state(estimator, first(signals), 0.0Hz, 0.0Hz)
     pending = DeviceRecord[]
     sizehint!(pending, max_pending_records)
     incoming = DeviceRecord[]
     sizehint!(incoming, max_pending_records)
+    set_navigation_mode!(segment, _navigation_mode(estimator))
     LoopCore(
         driver,
         banks,
@@ -349,6 +368,7 @@ function LoopCore(
         segment,
         cfg,
         estimator,
+        vector_banks,
         n,
         caps.num_ants,
         pending,
@@ -363,9 +383,44 @@ function LoopCore(
         0,
         true,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0,
         zeros(Int64, length(LATENCY_EDGES_US) + 1),
         0,
     )
+end
+
+# ── The estimator ────────────────────────────────────────────────────────────
+
+# Whether the core runs vector tracking: every satellite shares the estimator's
+# navigation engine, which the core publishes.
+_is_vector(::AbstractDopplerEstimator) = false
+_is_vector(::VectorPLLAndDLL) = true
+@inline _is_vector(core::LoopCore) = _is_vector(core.estimator)
+
+_navigation_mode(estimator::AbstractDopplerEstimator) =
+    _is_vector(estimator) ? HardwareLoopProtocol.NAV_VECTOR : HardwareLoopProtocol.NAV_NONE
+
+# Whether a vector-tracking estimator was built for `signal`.
+_lists_signal(estimator::VectorPLLAndDLL, signal::AbstractGNSSSignal) =
+    any(group -> typeof(group.signal) === typeof(signal), estimator.navigation.groups)
+
+# Check the estimator against the core's signals, and return per bank whether
+# it may drive a satellite in vector mode.
+_check_estimator(::AbstractDopplerEstimator, signals::Tuple) = fill(false, length(signals))
+function _check_estimator(estimator::VectorPLLAndDLL, signals::Tuple)
+    estimator.inner isa NCOReferencedPLLAndDLL || throw(ArgumentError(
+        "vector tracking in the loop process needs the delay-aware loop as its inner estimator: " *
+        "`VectorPLLAndDLL(signals...; inner = NCOReferencedPLLAndDLL())`"))
+    estimator.navigation.enabled || throw(ArgumentError(
+        "a `VectorPLLAndDLL` built with `config = nothing` only solves a scalar PVT; " *
+        "the loop process runs either vector tracking or the scalar loops, which publish no PVT"))
+    listed = Bool[_lists_signal(estimator, signal) for signal in signals]
+    for (signal, ok) in zip(signals, listed)
+        ok || iszero(get_data_frequency(signal)) || throw(ArgumentError(
+            "the vector-tracking estimator does not list $(nameof(typeof(signal))), " *
+            "which the core can arm as a driver; build it with every data signal of the core"))
+    end
+    listed
 end
 
 # ── Bank dispatch ────────────────────────────────────────────────────────────

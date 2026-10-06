@@ -137,6 +137,29 @@ tag, state = read_snapshot(snapshot_slot(seg, 1))
  synchronised = state.flags & HLP.STATE_SYNC_FOUND != 0)
 ```
 
+## Vector tracking
+
+Built with TrackingLoops' `VectorPLLAndDLL`, the core closes every satellite's
+loops through one shared navigation engine and publishes each navigation cycle
+on the segment's loop-wide nav ring: a `NavSatelliteEvent` per armed driver
+channel, then the `NavSolutionEvent`, which is also written into the nav
+snapshot. The segment's `navigation_mode` is `NAV_VECTOR`, so the receiver
+takes the position from the loop instead of decoding the bits itself; with the
+scalar loops it is `NAV_NONE` and the nav ring stays empty.
+
+```julia
+estimator = VectorPLLAndDLL(GPSL1CA(); inner = NCOReferencedPLLAndDLL())
+core = LoopCore(dev, (GPSL1CA(),), seg; estimator)
+# … service passes …
+tag, solution = read_nav_snapshot(seg)
+solution.position_ecef_m, solution.flags & HLP.NAV_RUNNING != 0
+```
+
+The estimator must list every data signal of the core. Its satellites are
+stepped from the records alone; the core gives each record the satellite's PRN
+and the replica's code phase, and keeps stepping them through a stale backlog
+so the engine never starves.
+
 ## Diagnostics
 
 The core counts what went wrong instead of throwing on the service path. Among
@@ -144,7 +167,9 @@ the counters on a [`LoopCore`](@ref): `stale_dumps` (records for a channel that
 was free, re-armed or not yet confirmed), `lost_record_gaps` (records that
 never arrived), `words_late` and `words_rejected`, `dropped_records` (ingest
 buffer full), and `latency_hist`, a histogram of the record-to-word latency over
-[`LATENCY_EDGES_US`](@ref).
+[`LATENCY_EDGES_US`](@ref). In vector mode, `nav_events_published` counts the
+nav ring's events and `max_nav_cycle_ns` is the longest pass that ran a
+navigation cycle.
 
 ```@example usage
 (core.stale_dumps, core.lost_record_gaps, core.words_late, core.max_record_age_us)
