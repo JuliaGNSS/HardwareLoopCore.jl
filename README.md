@@ -19,7 +19,9 @@ the new NCO words back.
   channel table, the epoch clock, the noise references, the
   `HardwareLoopProtocol` segment it publishes into. `service_pass!` is one pass
   (wait → read → fold closed epochs → commit words → commands → confirm arms →
-  heartbeat); `run!` loops it. A warm pass allocates nothing.
+  heartbeat); `run!` loops it. A warm pass allocates nothing. Built with
+  TrackingLoops' `VectorPLLAndDLL`, it runs vector tracking and publishes the
+  navigation solution on the segment's nav ring.
 - `SimulatedDevice` — a software correlator behind the driver API, for tests
   and for trying the core without hardware.
 
@@ -66,9 +68,11 @@ service_pass!(core; wait_ms = 0)
 
 - The signal types, the antenna count and the hardware channel count are fixed
   when the core is constructed.
-- One estimator: TrackingLoops' `NCOReferencedPLLAndDLL` with its default loop
-  filters. Its bandwidths are set loop-wide; the per-arm bandwidths of an
-  `ArmCommand` are not applied yet.
+- One estimator per core, by default TrackingLoops' `NCOReferencedPLLAndDLL`.
+  Its bandwidths are set loop-wide; the per-arm bandwidths of an `ArmCommand`
+  are not applied yet.
+- Vector tracking (`VectorPLLAndDLL`): data signals only, one shared engine,
+  and the navigation cycle runs inside the service pass.
 - A record carries at most five taps and ten tap × antenna values.
 - With several antennas there is no beamforming, and the antennas are taken to
   see equal, uncorrelated noise.
