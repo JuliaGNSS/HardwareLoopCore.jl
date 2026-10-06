@@ -240,7 +240,7 @@ channel snapshots.
 
 | Package | Change | Type |
 |---|---|---|
-| HardwareLoopCore | allow TrackingLoops 2 and 3 | `fix(deps)` (done on `update`) |
+| HardwareLoopCore | allow TrackingLoops 2 and 3 | `fix(deps)` (#13, released in 1.0.2) |
 | HardwareLoopProtocol 2.0 | loop-wide nav ring, snapshot, header fields | `feat!` |
 | HardwareLoopCore | generic estimator, records with prn and code phase | `feat` (TrackingLoops ≥ 3) |
 | HardwareLoopCore 2.0 | vector mode and nav publishing on protocol 2 | `feat!` |
