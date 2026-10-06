@@ -204,9 +204,13 @@ channel snapshots.
     offset-binary I/Q at zero IF, about 246 MB. GNSSReceiver's
     `test/ion_rtlsdr_integration.jl` already uses it, and its `_ion_produce!`
     shows the sample conversion.
-  - Download it once and cache it with Scratch.jl, as GNSSReceiver does.
-    The test is opt-in (`HARDWARELOOPCORE_RUN_INTEGRATION_TEST=true`) and
-    runs in its own CI job, so the default suite stays offline and fast.
+  - It runs on every PR as part of the normal suite, with no gate, as in
+    GNSSReceiver. The file is downloaded once with `curl` into a Scratch.jl
+    space (`@get_scratch!("rtl_sdr_test_data")`), and `julia-actions/cache`
+    keeps it between CI runs.
+  - The recording carries one signal, GPS L1 C/A, so the test covers exactly
+    that. Pilot/data pairs, other systems and other bands get no
+    recorded-data test until a recording with them is chosen.
   - Arm the channels from an acquisition of the first milliseconds
     (Acquisition.jl as a test dependency), with the noise reference on a
     spare channel. Build `VectorPLLAndDLL(GPSL1(); inner =
@@ -220,10 +224,12 @@ channel snapshots.
       a pipeline baseline, not a surveyed point;
     - no word lands late, with a record delay of 0 and 2 epochs.
   - Cost: `SimulatedDevice` correlates sample by sample, about 3×10⁹ tap
-    operations for 60 s and 8 channels. It runs in minutes, which is
-    acceptable for an opt-in job. Measure it first, and cut to the shortest
-    span that still seeds the filter (about 35 s to the first fix in
-    GNSSReceiver's benchmark) if it is too slow.
+    operations for 60 s and 8 channels. Because this runs on every PR,
+    measure it first. If it takes more than a few minutes:
+    - stop at the shortest span that still seeds the filter (about 35 s to
+      the first fix in GNSSReceiver's benchmark);
+    - give `correlate_chunk!` a vectorised path that correlates a whole
+      chunk per channel.
 - **Closed loop, synthetic (scalar):** the existing `SimulatedDevice` tests
   stay as they are and keep covering the scalar path offline.
 - **Allocation:** a warm pass that includes a navigation cycle and the nav
@@ -262,12 +268,9 @@ channel snapshots.
   (2026-10-06).
 - The vector closed-loop test runs on a downloaded recording, not on
   synthetic satellites (2026-10-06).
+- That test runs on every PR, and on GPS L1 C/A only, the one signal in the
+  recording (2026-10-06).
 
 ## Open questions
 
-1. Should the opt-in recorded-data job run on every PR or only nightly and
-   before a release? Every PR costs about 250 MB of download (cached) and
-   minutes of correlation.
-2. Multi-band and multi-system coverage: the Fraunhofer III-7a capture (L1,
-   E1 and L5; 15.7 s, 1.6 GB) is too short for a fix. Should it be used later
-   to check tracking on several bands, or is that left to the hardware?
+None at the moment.
