@@ -64,8 +64,7 @@ the bits and solving the PVT itself.
   - a nav event ring (SPSC, 192 B slots, default capacity 1024);
   - one seqlocked snapshot slot holding the latest `NavSolutionEvent`.
 - Add `nav_ring_offset`, `nav_capacity` and `nav_snapshot_offset` to the header.
-- Add `navigation_mode::UInt8` to the header: `NAV_NONE`, `NAV_SCALAR_PVT` or
-  `NAV_VECTOR`. The loop writes it at creation, so the receiver knows which
+- Add `navigation_mode::UInt8` to the header: `NAV_NONE` or `NAV_VECTOR`. The loop writes it at creation, so the receiver knows which
   path to take before the first event.
 - Add every new struct to `layout_hash` and `_check_geometry`. Bump
   `PROTOCOL_VERSION` to 2, so that old and new builds refuse each other.
@@ -95,8 +94,8 @@ cycle epoch on the reference counter. Every payload is isbits and at most
   - `release_reason::UInt8` (mirrors `VTReleaseReason`).
 - Ordering: a cycle's satellite events come first and its solution event
   last. A reader treats the solution as the commit marker for that cycle.
-- Inter-system and inter-frequency biases are left out of 2.0; see the open
-  questions.
+- Inter-system and inter-frequency biases are not published. `clock_bias_m`
+  is the receiver clock bias of the solution's reference system.
 
 **API.** `nav_ring(segment)`, `publish_nav_solution!` (which writes the ring and
 the snapshot) and `read_nav_snapshot`, with the same seqlock idiom as the
@@ -144,8 +143,13 @@ channel snapshots.
 
 1. Construction writes `navigation_mode` into the header:
    - `NAV_VECTOR` for `VectorPLLAndDLL` with a config;
-   - `NAV_SCALAR_PVT` for `config = nothing`;
-   - `NAV_NONE` for the scalar loops.
+   - `NAV_NONE` for the scalar loops, which publish no solution: the nav ring
+     stays empty and the snapshot invalid.
+
+   A `VectorPLLAndDLL` with `config = nothing` (scalar PVT only) is rejected at
+   construction. A loop running scalar loops never computes a PVT. In vector
+   mode, the solutions published before the filter is seeded are the engine's
+   own scalar fixes, flagged without `SEEDED`.
 2. At the end of `fold_closed_epochs!`, if
    `navigation_cycle(core.estimator) > core.last_nav_cycle`, then:
    - for each armed driving channel, read
@@ -173,8 +177,12 @@ channel snapshots.
    - skip decoding and `calc_pvt`;
    - take C/N₀ and lock per satellite from the reports;
    - on `:lost`, fall back to `read_nav_snapshot`.
-3. BIT events keep being mirrored for data output and logging.
-4. Arming policy stays on the receiver, and it must not arm pilots as drivers
+3. When `navigation_mode == NAV_NONE` (scalar loops), nothing changes: the
+   receiver decodes the mirrored bits and solves the PVT itself with
+   PositionVelocityTime's `calc_pvt`, the same solver TrackingLoops' engine
+   uses for its scalar fix.
+4. BIT events keep being mirrored for data output and logging.
+5. Arming policy stays on the receiver, and it must not arm pilots as drivers
    in vector mode.
 
 ## Tests
@@ -187,11 +195,37 @@ channel snapshots.
   - the new event layouts and the hash;
   - ring and snapshot round-trips;
   - a v1 segment is refused.
-- **Closed loop:** `SimulatedDevice` needs satellites with real geometry and
-  LNAV bits. Reuse TrackingLoops' test-side LNAV encoder and its
-  PositionVelocityTime fixtures. The first target is GPS L1 C/A only, from bit
-  sync to the scalar fix, the filter seed and vector tracking, under 0, 2 and
-  4 epochs of record delay.
+- **Closed loop on recorded samples (vector):** feed the ION RTL-SDR
+  recording through `SimulatedDevice`, which already correlates any raw
+  samples it is handed (`correlate_chunk!`) and reports each record's code
+  phase. No synthetic geometry or LNAV encoder is needed.
+  - Data: `https://sdr.ion.org/RTL_SDR/RTLSDR_Bands-L1.uint8`, GPS L1 C/A
+    only (which matches the data-only scope), 60 s, 2.048 MS/s, 8-bit
+    offset-binary I/Q at zero IF, about 246 MB. GNSSReceiver's
+    `test/ion_rtlsdr_integration.jl` already uses it, and its `_ion_produce!`
+    shows the sample conversion.
+  - Download it once and cache it with Scratch.jl, as GNSSReceiver does.
+    The test is opt-in (`HARDWARELOOPCORE_RUN_INTEGRATION_TEST=true`) and
+    runs in its own CI job, so the default suite stays offline and fast.
+  - Arm the channels from an acquisition of the first milliseconds
+    (Acquisition.jl as a test dependency), with the noise reference on a
+    spare channel. Build `VectorPLLAndDLL(GPSL1(); inner =
+    NCOReferencedPLLAndDLL(), approximate_year = 2017)`.
+  - Assert, through the segment's nav ring and snapshot only:
+    - the healthy PRNs GNSSReceiver's test expects are tracked;
+    - the filter seeds, and at least four members are in the vector loop by
+      the end;
+    - the final position is within 50 m of GNSSReceiver's regression fix,
+      ECEF `[3.9074087926e6, 3.0683836901e5, 5.0149608655e6]`. That fix is
+      a pipeline baseline, not a surveyed point;
+    - no word lands late, with a record delay of 0 and 2 epochs.
+  - Cost: `SimulatedDevice` correlates sample by sample, about 3×10⁹ tap
+    operations for 60 s and 8 channels. It runs in minutes, which is
+    acceptable for an opt-in job. Measure it first, and cut to the shortest
+    span that still seeds the filter (about 35 s to the first fix in
+    GNSSReceiver's benchmark) if it is too slow.
+- **Closed loop, synthetic (scalar):** the existing `SimulatedDevice` tests
+  stay as they are and keep covering the scalar path offline.
 - **Allocation:** a warm pass that includes a navigation cycle and the nav
   publish allocates nothing.
 - **Trim:** the core with `VectorPLLAndDLL` builds with `juliac --trim=safe`.
@@ -221,13 +255,19 @@ channel snapshots.
   both the vector grid and `_to_reference` are wrong. Ask the driver for a
   per-band offset at that point.
 
+## Settled
+
+- Inter-system and inter-frequency biases are not published (2026-10-06).
+- Scalar loops publish no PVT; the receiver solves it from the bits
+  (2026-10-06).
+- The vector closed-loop test runs on a downloaded recording, not on
+  synthetic satellites (2026-10-06).
+
 ## Open questions
 
-1. Are the inter-system and inter-frequency biases needed by the receiver
-   (for example multi-GNSS output)? If so, add an `EVENT_NAV_BIAS` in
-   protocol 2.0, before the layout freezes.
-2. Should the loop-computed solution also be available without vector tracking
-   (`config = nothing`, `NAV_SCALAR_PVT`) as the default, so the receiver
-   always uses one path?
-3. Is `SimulatedDevice` the right place for geometry and LNAV, or should a
-   test-only device live in the test tree?
+1. Should the opt-in recorded-data job run on every PR or only nightly and
+   before a release? Every PR costs about 250 MB of download (cached) and
+   minutes of correlation.
+2. Multi-band and multi-system coverage: the Fraunhofer III-7a capture (L1,
+   E1 and L5; 15.7 s, 1.6 GB) is too short for a fix. Should it be used later
+   to check tracking on several bands, or is that left to the hardware?
