@@ -338,6 +338,9 @@ function LoopCore(
     num_ants::NumAnts{N} = NumAnts(1),
 ) where {N}
     caps = driver_capabilities(driver)
+    band_table(segment) == caps.bands || throw(ArgumentError(
+        "the segment's band table differs from the driver's bands (ids, rates, intermediate frequencies, " *
+        "RF inputs); create the segment with `bands = driver_capabilities(driver).bands`"))
     n = caps.num_channels
     reference = first(caps.bands)
     cfg = something(

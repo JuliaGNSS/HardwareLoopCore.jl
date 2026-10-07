@@ -52,3 +52,30 @@ end
     @test read_records!(dev, records) == 1
     @test is_strobe(only(records))
 end
+
+@testset "SimulatedDevice runs its carrier NCO at the IF plus the Doppler" begin
+    shifts = ntuple(i -> Int32(i <= 3 ? 2 - i : 0), 5)
+    # PRN 1 at a 1 kHz Doppler on a 1 kHz IF, without noise.
+    samples = [get_code(CORE_SYSTEM, 1.023e6 * (k - 1) / CORE_FS, 1) * cis(2π * 2000.0 * (k - 1) / CORE_FS)
+               for k = 1:CORE_EPOCH]
+    function prompt(intermediate_frequency)
+        dev = SimulatedDevice(CORE_SYSTEM; sampling_freq = CORE_FS, num_channels = 1, intermediate_frequency)
+        HardwareLoopCore.arm!(dev, 1, ArmSpec(CORE_SYSTEM, 1, 1000.0, 0.0, 0.0, 0, shifts, 3, 1, 1, 1, CORE_FS, 1.0, 1.0))
+        correlate_chunk!(dev, samples)
+        records = DeviceRecord[]
+        read_records!(dev, records)
+        abs(first(r for r in records if !is_strobe(r)).taps[2])
+    end
+    @test prompt(1000.0) ≈ CORE_EPOCH rtol = 1e-3
+    # Without the IF the wipe-off is a whole carrier cycle per code period off.
+    @test prompt(0.0) < 0.01CORE_EPOCH
+end
+
+@testset "The core refuses a segment whose band table is not the driver's" begin
+    dev = SimulatedDevice(CORE_SYSTEM; sampling_freq = CORE_FS, num_channels = 2, intermediate_frequency = -83.0)
+    @test only(driver_capabilities(dev).bands).intermediate_frequency_hz == -83.0
+    other = create_segment(nothing, SegmentConfig(; channel_count = 2, bands = [BandEntry(Symbol(only(dev.bands).band_id), CORE_FS)]))
+    @test_throws "band table differs" LoopCore(dev, (CORE_SYSTEM,), other)
+    same = create_segment(nothing, SegmentConfig(; channel_count = 2, bands = dev.bands))
+    @test band_table(LoopCore(dev, (CORE_SYSTEM,), same).segment) == dev.bands
+end

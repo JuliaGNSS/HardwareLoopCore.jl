@@ -17,8 +17,20 @@ const ION_EPOCH = 2048                   # one C/A code period
 const ION_PRNS = [5, 7, 8, 13, 15, 18, 20, 21, 24, 28, 30]
 # GNSSReceiver's final scalar fix (ECEF, m): a pipeline baseline, not a surveyed point.
 const ION_POSITION = [3.9074087926e6, 3.0683836901e5, 5.0149608655e6]
+# East/north/up at the baseline (52.177° N, 4.490° E).
+const ION_ENU = let lat = deg2rad(52.177), lon = deg2rad(4.490)
+    [-sin(lon) cos(lon) 0; -sin(lat)*cos(lon) -sin(lat)*sin(lon) cos(lat); cos(lat)*cos(lon) cos(lat)*sin(lon) sin(lat)]
+end
 # Its final-fix epoch, 2017-09-10T22:57:20.697 TAI, in seconds since J2000.
 const ION_TIME_TAI_S = 5.58356240697e8
+# Where the samples' zero Doppler sits. The RTL-SDR's tuned frequency is off by a fixed
+# ~83 Hz (its LO synthesizer's resolution), which the code does not share: scalar loops
+# hold code − carrier/1540 ≈ +0.054 Hz on every satellite. A driver computes this from
+# its tuner settings; the recording does not say which settings it was made with, so
+# the value here is the measured one. Uncompensated, the vector
+# filter's single clock drift cannot satisfy both the carrier rates and the code, and
+# the conflict leaks into the height (JuliaGNSS/TrackingLoops.jl#35).
+const ION_INTERMEDIATE_FREQUENCY = -83.0
 
 function ion_recording()
     file = joinpath(@get_scratch!("rtl_sdr_test_data"), "RTLSDR_Bands-L1.uint8")
@@ -51,14 +63,17 @@ end
 # One run over the whole recording: acquire the healthy satellites in the first
 # 10 ms, arm them and a noise reference, then one service pass per code period.
 function run_ion_vector(file; record_delay_epochs)
-    initial = open(io -> read_ion_samples!(zeros(ComplexF64, 10ION_EPOCH), Vector{UInt8}(undef, 20ION_EPOCH), io), file)
-    acquired = acquire(GPSL1CA(), initial, ION_FS * Hz, ION_PRNS;
-                       num_coherently_integrated_code_periods = 2, num_noncoherent_accumulations = 5,
-                       subsample_interpolation = true)
     num_channels = length(ION_PRNS) + 1
     dev = SimulatedDevice(GPSL1CA(); sampling_freq = ION_FS, num_channels,
-                          record_delay_samples = record_delay_epochs * ION_EPOCH)
+                          record_delay_samples = record_delay_epochs * ION_EPOCH,
+                          intermediate_frequency = ION_INTERMEDIATE_FREQUENCY)
     seg = create_segment(nothing, SegmentConfig(; channel_count = num_channels, bands = dev.bands))
+    # The receiver's side: acquire around the IF the band table publishes.
+    initial = open(io -> read_ion_samples!(zeros(ComplexF64, 10ION_EPOCH), Vector{UInt8}(undef, 20ION_EPOCH), io), file)
+    acquired = acquire(GPSL1CA(), initial, ION_FS * Hz, ION_PRNS;
+                       interm_freq = band_table(seg)[1].intermediate_frequency_hz * Hz,
+                       num_coherently_integrated_code_periods = 2, num_noncoherent_accumulations = 5,
+                       subsample_interpolation = true)
     estimator = VectorPLLAndDLL(GPSL1CA(); inner = NCOReferencedPLLAndDLL(), approximate_year = 2017)
     core = LoopCore(dev, (GPSL1CA(),), seg; estimator)
     shifts = HardwareLoopCore._template_tap_shifts(core.banks[1].template, ION_FS, GPSL1CA())
@@ -132,7 +147,16 @@ end
     @test solution.flags & (HLP.NAV_VALID | HLP.NAV_TIME_VALID) == HLP.NAV_VALID | HLP.NAV_TIME_VALID
     @test solution.num_members >= 4
     @test solution.num_sats >= 4
-    @test norm(collect(solution.position_ecef_m) .- ION_POSITION) < 50.0
+    # Within a few metres of the baseline. Its height is the least certain part: no
+    # ionospheric coefficients are decoded from 60 s, so nothing corrects for the
+    # ionosphere (the scalar fixes sit some 6 m high as well).
+    @test norm(collect(solution.position_ecef_m) .- ION_POSITION) < 10.0
+    enu = [ION_ENU * (collect(s.position_ecef_m) .- ION_POSITION) for (_, s) in r.solutions[first_seeded:end]]
+    @test norm(sum(e -> e[1:2], enu) / length(enu)) < 5.0
+    # Code and carrier agree once the front end's offset is the IF: no common-mode
+    # code residual is left for the single clock drift to fight (-30 m without it).
+    last_cycle_residuals = [s.residual_m for (_, s) in r.satellites if s.cycle == solution.cycle]
+    @test abs(sum(last_cycle_residuals) / length(last_cycle_residuals)) < 5.0
     @test norm(collect(solution.velocity_ecef_mps)) < 5.0           # a static receiver
     @test abs(solution.time_tai_s + solution.time_tai_frac - ION_TIME_TAI_S) < 1.0
     @test all(isfinite, solution.dop) && solution.position_std_m < 10.0
