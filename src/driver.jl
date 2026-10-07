@@ -14,7 +14,9 @@ Supertype of a hardware correlator's driver as the loop core sees it. Required:
     has produced since the last call to `records` (a `Vector{DeviceRecord}`
     sized once), returning how many. Never blocks.
   - [`write_word!`](@ref)`(driver, channel, carrier_hz, code_hz)` — commit a
-    carrier and code NCO word on `channel`, effective on the next sample.
+    carrier and code NCO word on `channel`, effective on the next sample. The
+    carrier is a Doppler: the channel's carrier NCO runs at its band's
+    intermediate frequency plus it.
   - [`arm!`](@ref)`(driver, channel, spec::ArmSpec)` — load a replica and start
     correlating; returns [`ArmOutcome`](@ref).
   - [`release!`](@ref)`(driver, channel)`.
@@ -189,6 +191,13 @@ arm_rejected(reason) = ArmOutcome(false, UInt32(reason))
 
 The device's fixed limits as the core needs them: channels, the widest tap
 layout its records carry, antennas, and the band table.
+
+Each band's `BandEntry` carries its `intermediate_frequency_hz`: where a signal
+at zero Doppler sits in the band's samples, including any fixed offset the
+front end's tuning leaves (an RTL-SDR's LO synthesizer lands a fixed number of
+Hz off the requested frequency, which follows from its settings). The driver
+runs every carrier NCO of the band at that IF plus the Doppler the core
+commands; the core, the protocol and the receiver deal in Dopplers only.
 """
 struct DriverCapabilities
     num_channels::Int
@@ -212,7 +221,8 @@ function read_records! end
     write_word!(driver, channel, carrier_hz::Float64, code_hz::Float64) -> Bool
 
 Commit a carrier and a code NCO word (the Dopplers, in Hz) on `channel`,
-effective on the device's next sample. Return `false` if the device refused the
+effective on the device's next sample. The carrier NCO runs at the band's
+intermediate frequency ([`DriverCapabilities`](@ref)) plus `carrier_hz`. Return `false` if the device refused the
 word (e.g. the channel is not running), which the core counts as rejected.
 Required for every [`AbstractLoopDriver`](@ref).
 """

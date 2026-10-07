@@ -39,7 +39,7 @@ SimulatedChannel() = SimulatedChannel(
 """
     SimulatedDevice(signals::Tuple; sampling_freq, num_channels = 6, epoch_length,
                     dump_interval_samples = 0, handover_code_phase_error = 0.0,
-                    record_delay_samples = 0,
+                    record_delay_samples = 0, intermediate_frequency = 0.0,
                     band_id = get_band_id(get_band(first(signals))))
     SimulatedDevice(signal; kwargs...)
 
@@ -54,6 +54,11 @@ to every arm's code phase: real handovers are never exact, and it is what makes
 the code loop's sign observable over a short run. `record_delay_samples` holds
 every record back until the counter is that far past its end — the DMA latency
 of a real device, and the knob the delay-tolerance tests turn.
+`intermediate_frequency` (Hz) is where the samples' zero Doppler sits, reported
+as the band's `intermediate_frequency_hz`: every channel's carrier NCO runs at it
+plus the Doppler the core commands, as a gateware NCO does. Besides a real IF it
+takes a front end whose tuned frequency is off by a fixed amount (an RTL-SDR's
+LO synthesizer lands a fixed number of Hz off).
 """
 mutable struct SimulatedDevice{S<:Tuple} <: AbstractLoopDriver
     const signals::S
@@ -83,6 +88,7 @@ function SimulatedDevice(
     dump_interval_samples::Integer = 0,
     handover_code_phase_error::Real = 0.0,
     record_delay_samples::Integer = 0,
+    intermediate_frequency::Real = 0.0,
     band_id = get_band_id(get_band(first(signals))),
 )
     fs = sampling_freq isa Real ? Float64(sampling_freq) : Float64(ustrip(Hz, uconvert(Hz, sampling_freq)))
@@ -98,7 +104,7 @@ function SimulatedDevice(
         Int(dump_interval_samples),
         Float64(handover_code_phase_error),
         Int(record_delay_samples),
-        [BandEntry(band_id, fs)],
+        [BandEntry(band_id, fs; intermediate_frequency_hz = intermediate_frequency)],
         Int64(0),
         sizehint!(DeviceRecord[], 1 << 16),
         0,
@@ -212,6 +218,7 @@ function correlate_chunk!(dev::SimulatedDevice, samples::AbstractVector)
     queued = 0
     channels = dev.channels
     fs = dev.sampling_freq
+    intermediate_frequency = dev.bands[1].intermediate_frequency_hz
     @inbounds for k in eachindex(samples)
         sample = ComplexF64(samples[k])
         for index in eachindex(channels)
@@ -224,7 +231,7 @@ function correlate_chunk!(dev::SimulatedDevice, samples::AbstractVector)
                 chip = _sim_code(dev.signals, ch.signal_index, ch.code_phase + offset_chips, ch.prn)
                 ch.accumulators[tap] += wipeoff * chip
             end
-            ch.carrier_phase += ch.carrier_doppler / fs
+            ch.carrier_phase += (intermediate_frequency + ch.carrier_doppler) / fs
             ch.code_phase += code_freq / fs
             ch.integrated_samples += 1
             wrapped = ch.code_phase >= ch.code_length

@@ -1,6 +1,6 @@
 # Vector tracking in the loop process
 
-Status: proposal · 2026-10-06
+Status: Phases 1–3 implemented (HardwareLoopProtocol 2.0.0 and #11; HardwareLoopCore#15) · 2026-10-07
 
 ## Goal
 
@@ -219,9 +219,12 @@ channel snapshots.
     - the healthy PRNs GNSSReceiver's test expects are tracked;
     - the filter seeds, and at least four members are in the vector loop by
       the end;
-    - the final position is within 50 m of GNSSReceiver's regression fix,
-      ECEF `[3.9074087926e6, 3.0683836901e5, 5.0149608655e6]`. That fix is
-      a pipeline baseline, not a surveyed point;
+    - the final position is within 10 m of GNSSReceiver's regression fix,
+      ECEF `[3.9074087926e6, 3.0683836901e5, 5.0149608655e6]`, and the mean
+      horizontal error under 5 m. That fix is a pipeline baseline, not a
+      surveyed point;
+    - the common-mode code residual stays under 5 m, with the device at the
+      front end's IF (see below);
     - no word lands late, with a record delay of 0 and 2 epochs.
   - Cost: `SimulatedDevice` correlates sample by sample, about 3×10⁹ tap
     operations for 60 s and 8 channels. Because this runs on every PR,
@@ -236,14 +239,38 @@ channel snapshots.
   publish allocates nothing.
 - **Trim:** the core with `VectorPLLAndDLL` builds with `juliac --trim=safe`.
 
+## The front end's carrier offset (found while testing)
+
+On the ION recording the vector filter first settled about 12 m too high. The
+cause is the RTL-SDR, not the vector path. Its tuned frequency is about 83 Hz
+off, and the code does not share that offset:
+- scalar loops hold `code − carrier/1540 ≈ +0.054 Hz` on every satellite;
+- a ppm error of the shared crystal would leave this at 0.
+
+One clock-drift state cannot satisfy both the carrier rates and the code. The
+conflict leaves a −30 m common-mode code residual, part of which leaks into
+the height (JuliaGNSS/TrackingLoops.jl#35).
+
+The offset is deterministic from the SDR's settings, so it is the driver's to
+report, not the core's to estimate. HardwareLoopProtocol 3.0 carries each
+band's `intermediate_frequency_hz` in the band table, and drivers run their
+carrier NCOs at IF + Doppler; `SimulatedDevice` takes it as a keyword. The
+recorded-data test runs at IF = −83 Hz and holds the final position within
+10 m of the baseline. The rest of its error (about +6 m up) is the
+uncorrected ionosphere: no Klobuchar coefficients are in 60 s of data.
+
+GNSSReceiver looked unaffected because its filter assumes 100 ms cycles that
+last 104 ms (4 ms chunks). That scales its velocity and clock drift by 1.04
+and happened to cancel half of the offset.
+
 ## Releases
 
 | Package | Change | Type |
 |---|---|---|
 | HardwareLoopCore | allow TrackingLoops 2 and 3 | `fix(deps)` (#13, released in 1.0.2) |
-| HardwareLoopProtocol 2.0 | loop-wide nav ring, snapshot, header fields | `feat!` |
-| HardwareLoopCore | generic estimator, records with prn and code phase | `feat` (TrackingLoops ≥ 3) |
-| HardwareLoopCore 2.0 | vector mode and nav publishing on protocol 2 | `feat!` |
+| HardwareLoopProtocol 2.0 | loop-wide nav ring, snapshot, header fields | `feat!` (released) |
+| HardwareLoopProtocol 3.0 | each band's intermediate frequency in the band table | `feat!` (#11, merged) |
+| HardwareLoopCore 2.0 | generic estimator, vector mode, nav publishing, band IF; protocol 3, TrackingLoops 3 | `feat!` (#15, one release) |
 | GNSSReceiver | consumes the loop's solution | `feat` |
 
 ## Risks

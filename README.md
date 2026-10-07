@@ -46,8 +46,9 @@ const HLP = HardwareLoopProtocol
 signal = GPSL1CA()
 dev = SimulatedDevice(signal; sampling_freq = 4e6, num_channels = 4)
 # `nothing` backs the segment with a heap buffer; a loop process passes a file
-# path under /dev/shm, which the receiver attaches to.
-seg = create_segment(nothing, SegmentConfig(; channel_count = 4, bands = [BandEntry(:L1, 4e6)]))
+# path under /dev/shm, which the receiver attaches to. It publishes the driver's
+# band table, intermediate frequencies included.
+seg = create_segment(nothing, SegmentConfig(; channel_count = 4, bands = driver_capabilities(dev).bands))
 core = LoopCore(dev, (signal,), seg)
 
 # The receiver arms channel 1 on PRN 7 …
