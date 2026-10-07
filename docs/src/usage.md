@@ -19,7 +19,8 @@ const HLP = HardwareLoopProtocol
 signal = GPSL1CA()
 fs = 4e6
 dev = SimulatedDevice(signal; sampling_freq = fs, num_channels = 2)
-seg = create_segment(nothing, SegmentConfig(; channel_count = 2, bands = [BandEntry(:L1, fs)]))
+# The segment publishes the driver's band table (rates and intermediate frequencies).
+seg = create_segment(nothing, SegmentConfig(; channel_count = 2, bands = driver_capabilities(dev).bands))
 core = LoopCore(dev, (signal,), seg)
 core.config.epoch_length
 ```
