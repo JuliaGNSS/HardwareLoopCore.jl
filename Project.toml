@@ -13,10 +13,10 @@ Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [compat]
 GNSSSignals = "4"
-HardwareLoopProtocol = "1"
+HardwareLoopProtocol = "3"
 StaticArrays = "1"
 TrackingLoopFilters = "1"
-TrackingLoops = "1, 2, 3"
+TrackingLoops = "3"
 Unitful = "1"
 julia = "1.10"
 

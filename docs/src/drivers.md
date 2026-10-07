@@ -27,6 +27,22 @@ and optionally:
 | [`wait_records`](@ref)`(d, timeout_ms)` | returns at once (the service loop polls) |
 | [`overflowed_channels!`](@ref)`(d)` | `0` (not read by the core yet) |
 
+## Intermediate frequency
+
+Each band in [`DriverCapabilities`](@ref) is a `BandEntry`, and its
+`intermediate_frequency_hz` is where a signal at zero Doppler sits in the band's
+samples. The core and the receiver deal in Dopplers only: the driver runs every
+carrier NCO of the band at that IF plus the Doppler the core commands, in
+[`arm!`](@ref) and [`write_word!`](@ref) alike.
+
+Report the IF the front end actually produces, including any fixed offset its
+tuning leaves. An RTL-SDR's LO synthesizer, for one, lands a fixed number of Hz
+off the requested frequency, which follows from its settings; left out, the
+carrier carries an offset the code does not share, and vector tracking turns it
+into a position error (JuliaGNSS/TrackingLoops.jl#35). The core refuses a
+segment whose band table differs from the driver's, so the receiver reads the
+same IF from the segment, for example to acquire around it.
+
 ## Records
 
 [`read_records!`](@ref) hands the core two kinds of [`DeviceRecord`](@ref):

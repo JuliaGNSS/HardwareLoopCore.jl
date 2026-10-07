@@ -67,11 +67,17 @@ Current limitations:
 
 - The signal types, the antenna count and the hardware channel count are
   fixed when the core is constructed.
-- One estimator: TrackingLoops' delay-aware `NCOReferencedPLLAndDLL` with its
-  default loop filters. Its bandwidths are set for the whole loop when the core
-  is built (the `estimator` keyword of [`LoopCore`](@ref)); the per-arm
-  `carrier_loop_bandwidth_hz` and `code_loop_bandwidth_hz` of an `ArmCommand`
-  are not applied yet.
+- One estimator per core, chosen when it is built (the `estimator` keyword of
+  [`LoopCore`](@ref)): by default TrackingLoops' delay-aware
+  `NCOReferencedPLLAndDLL`. Its bandwidths are set for the whole loop; the
+  per-arm `carrier_loop_bandwidth_hz` and `code_loop_bandwidth_hz` of an
+  `ArmCommand` are not applied yet.
+- Vector tracking (a `VectorPLLAndDLL` with an `NCOReferencedPLLAndDLL` inner
+  loop): data signals only — a pilot is refused as a driver and pilot/data
+  pairs (passengers) are refused altogether. All satellites share one
+  navigation engine, and its cycle (the scalar PVT or the filter update) runs
+  inside the service pass, in the `step_loop` of one record. Inter-system and
+  inter-frequency biases are not published.
 - A record carries at most five taps and ten tap × antenna values
   ([`MAX_RECORD_TAPS`](@ref)).
 - With several antennas, the core does no beamforming. The noise reference
