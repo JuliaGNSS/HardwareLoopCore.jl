@@ -13,7 +13,6 @@ Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [sources]
 HardwareLoopCore = {path = ".."}
-HardwareLoopProtocol = {url = "https://github.com/JuliaGNSS/HardwareLoopProtocol.jl", rev = "8ad29b2cca2d35cca1511c8994db06d086a6729e"}
 
 [compat]
 Acquisition = "2"

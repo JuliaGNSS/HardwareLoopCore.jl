@@ -8,7 +8,6 @@ TrackingLoops = "89eadfff-3a96-4166-8be0-4e8bed6efc30"
 
 [sources]
 HardwareLoopCore = {path = ".."}
-HardwareLoopProtocol = {url = "https://github.com/JuliaGNSS/HardwareLoopProtocol.jl", rev = "8ad29b2cca2d35cca1511c8994db06d086a6729e"}
 
 [compat]
 Documenter = "1"
