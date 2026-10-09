@@ -44,6 +44,17 @@ function _record_code_phase(core::LoopCore, signal, ch::Int, sample_end::Int64)
     T.code_phase[ch] + (sample_end - reference) * _code_rate_hz(core, ch, signal) / T.sampling_freq[ch]
 end
 
+# The channel whose slot holds the estimator state of channel `ch`'s satellite:
+# its own for a driver, its driver channel for a passenger, 0 for a noise
+# reference or a passenger whose driver is not armed.
+@inline function _estimator_channel(core::LoopCore, ch::Int)
+    T = core.channels
+    T.signal_index[ch] == 0 && return 0
+    T.signal_index[ch] == 1 && return ch
+    driver = T.driver_channel[ch]
+    driver != 0 && T.armed[driver] ? driver : 0
+end
+
 # Hand the channel's part-accumulated record to the loop and start a fresh one.
 # This is where the estimator steps, the events are published and the word to
 # be scheduled is refreshed. A no-op when nothing is accumulated.
@@ -74,11 +85,13 @@ function _emit_partial!(core::LoopCore, bank::ChannelBank, ch::Int)
         _driver_carrier_phase_offset(core, ch),
     )
     bank.states[ch] = state
-    # The loop: every record the driver component completes, unless this epoch
-    # is being folded observation-only (a stale backlog), in which case the
-    # bits and the C/N₀ are kept current and the filter is left alone. A vector
-    # loop is stepped regardless: its navigation engine drops a satellite that
-    # goes two navigation cycles without a record and falls back once it starves.
+    # The loop: every record of every satellite channel, driver and passengers
+    # alike, with the satellite's one estimator state — the driver channel's —
+    # unless this epoch is being folded observation-only (a stale backlog), in
+    # which case the bits and the C/N₀ are kept current and the filter is left
+    # alone. A vector loop is stepped regardless: its navigation engine drops a
+    # satellite that goes two navigation cycles without a record and falls back
+    # once it starves.
     flags = UInt32(0)
     band.noise_density_ready && (flags |= HardwareLoopProtocol.RECORD_HAS_CN0)
     _is_secondary_code_removed(core, ch) && (flags |= HardwareLoopProtocol.RECORD_OVERLAY_WIPED)
@@ -86,18 +99,26 @@ function _emit_partial!(core::LoopCore, bank::ChannelBank, ch::Int)
     timeline = T.timeline[ch]
     record_start = Int64(sample_end) - Int64(samples)
     applied_carrier, applied_code = mean_nco_word(timeline, record_start, Int64(sample_end))
-    if T.signal_index[ch] == 1 && (!core.observation_only || _is_vector(core))
+    source = _estimator_channel(core, ch)
+    if source != 0 && (!core.observation_only || _is_vector(core))
         offset = _band_sample_offset(core, T.band[ch])
+        # The record carries the signal's state after the fold — its bit clock,
+        # the soft bits this record appended, its C/N₀ estimator — for the
+        # estimator to read; built before the bits are published and drained.
         record = LoopRecord(
             signal, filtered, previous_prompt, output, integrated_code_blocks, fs;
-            prn = T.prn[ch], sample_offset = offset,
+            prn = T.prn[ch], sample_offset = offset, signal_state = state,
         )
         landing = _to_band(core, T.band[ch], core.current_landing) + offset
-        est, carrier, code = step_loop(core.estimator, T.estimator[ch], record, timeline, landing)
-        T.estimator[ch] = est
-        T.carrier_doppler[ch] = ustrip(Hz, uconvert(Hz, carrier))
-        T.code_doppler[ch] = ustrip(Hz, uconvert(Hz, code))
-        T.word_dirty[ch] = true
+        est, carrier, code = step_loop(core.estimator, T.estimator[source], record, timeline, landing)
+        T.estimator[source] = est
+        # A passenger's record returns the command in force: the satellite's
+        # word is its driver's, which the passenger channel follows.
+        if source == ch
+            T.carrier_doppler[ch] = ustrip(Hz, uconvert(Hz, carrier))
+            T.code_doppler[ch] = ustrip(Hz, uconvert(Hz, code))
+            T.word_dirty[ch] = true
+        end
     end
     # Publish the record, then any bits it completed.
     ring = event_ring(core.segment, ch)

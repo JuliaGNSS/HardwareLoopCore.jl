@@ -6,15 +6,16 @@
 # An estimator that remembers what every record told it, then runs the
 # delay-aware loop: a host-side stand-in for an estimator that keeps
 # per-satellite state of its own.
+const SeenRecord = NamedTuple{(:prn, :code_phase, :sample_index, :signal),Tuple{Int,Float64,Int,Symbol}}
 struct RecordingEstimator{E} <: TrackingLoops.AbstractDopplerEstimator
     inner::E
-    seen::Vector{NamedTuple{(:prn, :code_phase, :sample_index),Tuple{Int,Float64,Int}}}
+    seen::Vector{SeenRecord}
 end
-RecordingEstimator() = RecordingEstimator(NCOReferencedPLLAndDLL(), NamedTuple{(:prn, :code_phase, :sample_index),Tuple{Int,Float64,Int}}[])
+RecordingEstimator() = RecordingEstimator(NCOReferencedPLLAndDLL(), SeenRecord[])
 TrackingLoops.init_estimator_state(e::RecordingEstimator, signal::AbstractGNSSSignal, carrier, code) =
     TrackingLoops.init_estimator_state(e.inner, signal, carrier, code)
 function TrackingLoops.step_loop(e::RecordingEstimator, state, record::TrackingLoops.LoopRecord, words, landing::Int64)
-    push!(e.seen, (; record.prn, record.code_phase, record.sample_index))
+    push!(e.seen, (; record.prn, record.code_phase, record.sample_index, signal = get_signal_id(record.signal)))
     TrackingLoops.step_loop(e.inner, state, record, words, landing)
 end
 
@@ -79,20 +80,20 @@ end
     @test f.core.vector_banks == [true, false]
 end
 
-@testset "Vector mode refuses pilots as drivers and passengers" begin
+@testset "Vector mode refuses an unpaired pilot as a driver and serves passengers" begin
     f = scripted_fixture((GPSL1CA(), GPSL1C_P()); estimator = vector_estimator(GPSL1CA()))
     arm!(f, 1, 7; doppler = 0.0, code_phase = 0.0, sequence = 1, signal = "GPSL1C_P")
+    # A driver of a listed signal, passengers of any signal and a noise
+    # reference of any are served.
     arm!(f, 2, 7; doppler = 0.0, code_phase = 0.0, sequence = 2, signal = "GPSL1C_P", signal_index = 2, group_key = "sat7")
     arm!(f, 3, 7; doppler = 0.0, code_phase = 0.0, sequence = 3, signal_index = 2, group_key = "sat7")
-    # A driver of a listed signal and a noise reference of any are served.
-    arm!(f, 4, 7; doppler = 0.0, code_phase = 0.0, sequence = 4)
+    arm!(f, 4, 7; doppler = 0.0, code_phase = 0.0, sequence = 4, group_key = "sat7")
     service_pass!(f.core; wait_ms = 0)
-    reasons = [only(statuses(f, ch)) for ch = 1:3]
-    @test all(s.code == HLP.STATUS_ARM_REJECTED for s in reasons)
-    @test [s.reason for s in reasons] ==
-          [HLP.REJECT_UNSUPPORTED_SIGNAL, HLP.REJECT_BAD_CONFIG, HLP.REJECT_BAD_CONFIG]
-    @test only(statuses(f, 4)).code == HLP.STATUS_ARMED
-    @test f.core.channels.armed == [false, false, false, true]
+    rejected = only(statuses(f, 1))
+    @test rejected.code == HLP.STATUS_ARM_REJECTED && rejected.reason == HLP.REJECT_UNSUPPORTED_SIGNAL
+    @test all(only(statuses(f, ch)).code == HLP.STATUS_ARMED for ch = 2:4)
+    @test f.core.channels.armed == [false, true, true, true]
+    @test f.core.channels.driver_channel[2:3] == [4, 4]
     g = scripted_fixture((GPSL1CA(), GPSL1C_P()); estimator = vector_estimator(GPSL1CA()))
     arm!(g, 1, 30; doppler = 0.0, code_phase = 0.0, sequence = 1, signal = "GPSL1C_P", signal_index = 0)
     service_pass!(g.core; wait_ms = 0)
@@ -179,4 +180,79 @@ end
     @test all(tag.prn == 9 && sat.channel == 1 for (tag, sat) in nav.satellites)
     # The engine's storage was sized at construction and is reused.
     @test length(estimator.navigation.groups[1].slots) == 16
+end
+
+# A pilot + data satellite on the scripted device: GPS L1C-P (10 ms code blocks,
+# five taps) drives, GPS L1 C/A (1 ms, LNAV-style bits every 20 ms) is the
+# passenger. Each signal's prompt sits at its carrier phase offset against the
+# driver's. The core's banks are `(GPSL1CA(), GPSL1C_P())`, so its epoch is a
+# C/A code period.
+const PAIR_BANKS = (GPSL1CA(), GPSL1C_P())
+
+function arm_pair!(f, prn)
+    pilot = f.core.banks[2].template
+    arm!(f, 1, prn; doppler = 0.0, code_phase = 0.0, sequence = 1, signal = "GPSL1C_P", group_key = "sat$prn",
+        num_taps = TrackingLoops.get_num_accumulators(pilot),
+        tap_sample_shifts = HardwareLoopCore._template_tap_shifts(pilot, CORE_FS, GPSL1C_P()))
+    arm!(f, 2, prn; doppler = 0.0, code_phase = 0.0, sequence = 2, signal = "GPSL1CA", signal_index = 2,
+        group_key = "sat$prn")
+end
+
+function feed_pair!(f, driver_ch, passenger_ch, prn, count; first = 1)
+    rotation = cis(get_carrier_phase_offset(GPSL1CA()) - get_carrier_phase_offset(GPSL1C_P()))
+    for k = first:(first+count-1)
+        f.dev.sample_count = Int64(k) * CORE_EPOCH
+        bit = isodd(div(k - 1, 20)) ? -1.0 : 1.0
+        prompt = rotation * bit * CORE_EPOCH
+        push!(f.dev.queue, DeviceRecord(passenger_ch, prn, f.dev.sample_count, CORE_EPOCH,
+            pack_taps(ComplexF64[prompt / 2, prompt, prompt / 2]), 3; code_phase = 0.0))
+        if k % 10 == 0
+            pilot = 10.0 * CORE_EPOCH
+            push!(f.dev.queue, DeviceRecord(driver_ch, prn, f.dev.sample_count, 10CORE_EPOCH,
+                pack_taps(ComplexF64[0.2pilot, 0.7pilot, pilot, 0.7pilot, 0.2pilot]), 5; code_phase = 0.0))
+        end
+        push!(f.dev.queue, strobe_record(f.dev.sample_count))
+        service_pass!(f.core; wait_ms = 0)
+    end
+    nothing
+end
+
+@testset "A passenger's records step its driver channel's estimator state" begin
+    estimator = RecordingEstimator()
+    f = scripted_fixture(PAIR_BANKS; estimator)
+    arm_pair!(f, 7)
+    service_pass!(f.core; wait_ms = 0)
+    @test f.core.channels.driver_channel[2] == 1
+    template = f.core.channels.estimator[2]
+    feed_pair!(f, 1, 2, 7, 60)
+    # Both channels' records reached the estimator…
+    @test count(s -> s.signal == :GPSL1CA, estimator.seen) >= 50
+    @test count(s -> s.signal == :GPSL1C_P, estimator.seen) >= 5
+    @test all(s -> s.prn == 7, estimator.seen)
+    # …with the satellite's one state, kept in the driver channel's slot.
+    @test f.core.channels.estimator[2] === template
+    @test f.core.channels.estimator[1] != template
+end
+
+@testset "A vector core ranges on a pilot and decodes its passenger data component" begin
+    estimator = vector_estimator(GPSL1C_P() => GPSL1CA())
+    f = scripted_fixture(PAIR_BANKS; estimator)
+    # The data signal is decoded, not driven: the core is built, and only the
+    # pilot may drive.
+    @test f.core.vector_banks == [false, true]
+    arm_pair!(f, 7)
+    service_pass!(f.core; wait_ms = 0)
+    @test all(only(statuses(f, ch)).code == HLP.STATUS_ARMED for ch = 1:2)
+    feed_pair!(f, 1, 2, 7, 450)
+    # The satellite is known by its pilot, and its bit clock is the data
+    # component's: the passenger channel's bits synced it.
+    report = satellite_report(estimator, GPSL1C_P(), 7)
+    @test report.tracked && report.bit_synced
+    @test isnothing(satellite_report(estimator, GPSL1CA(), 7))
+    @test estimator.navigation.registrations == 1
+    @test navigation_cycle(estimator) >= 3
+    nav = drain_nav!(f.seg)
+    @test !isempty(nav.satellites)
+    @test all(sat.signal == FixedName(:GPSL1C_P) && sat.channel == 1 for (_, sat) in nav.satellites)
+    @test all(sat.flags & HLP.NAV_SAT_BIT_SYNCED != 0 for (_, sat) in nav.satellites[end-1:end])
 end
