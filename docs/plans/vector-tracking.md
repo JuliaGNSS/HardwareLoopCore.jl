@@ -16,7 +16,7 @@ the bits and solving the PVT itself.
 |---|---|
 | How the solution reaches the receiver | A new loop-wide event ring for solution and per-satellite events, plus a seqlocked snapshot of the latest solution. This changes the protocol layout (HardwareLoopProtocol 2.0). |
 | What the receiver does in vector mode | It uses the loop's PVT and satellite reports, and skips its own decoding and `calc_pvt`. BIT events keep flowing. |
-| Pilot/data pairs | Data-only signals at first. A vector-mode arm whose driving signal the estimator does not list (any dataless pilot) is rejected. Pairs come later. |
+| Pilot/data pairs | A pilot drives when the estimator pairs it with its data component (`pilot => data`, TrackingLoops 4); the data component's channel is a passenger whose records every satellite's `step_loop` decodes. A vector-mode arm whose driving signal the estimator does not list is rejected. |
 | When the estimator is chosen | At construction (`LoopCore(...; estimator)`). A trimmed binary needs the type known at build time, and the protocol has no command to switch it. |
 
 ## What exists today

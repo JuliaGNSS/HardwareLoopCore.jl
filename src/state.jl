@@ -403,9 +403,12 @@ _is_vector(::VectorPLLAndDLL) = true
 _navigation_mode(estimator::AbstractDopplerEstimator) =
     _is_vector(estimator) ? HardwareLoopProtocol.NAV_VECTOR : HardwareLoopProtocol.NAV_NONE
 
-# Whether a vector-tracking estimator was built for `signal`.
+# Whether a vector-tracking estimator was built for `signal` as a driver, and
+# whether it decodes `signal` (a plain data signal, or a pilot's data component).
 _lists_signal(estimator::VectorPLLAndDLL, signal::AbstractGNSSSignal) =
     any(group -> typeof(group.signal) === typeof(signal), estimator.navigation.groups)
+_decodes_signal(estimator::VectorPLLAndDLL, signal::AbstractGNSSSignal) =
+    any(group -> typeof(group.decoding_signal) === typeof(signal), estimator.navigation.groups)
 
 # Check the estimator against the core's signals, and return per bank whether
 # it may drive a satellite in vector mode.
@@ -419,9 +422,11 @@ function _check_estimator(estimator::VectorPLLAndDLL, signals::Tuple)
         "the loop process runs either vector tracking or the scalar loops, which publish no PVT"))
     listed = Bool[_lists_signal(estimator, signal) for signal in signals]
     for (signal, ok) in zip(signals, listed)
-        ok || iszero(get_data_frequency(signal)) || throw(ArgumentError(
-            "the vector-tracking estimator does not list $(nameof(typeof(signal))), " *
-            "which the core can arm as a driver; build it with every data signal of the core"))
+        ok || iszero(get_data_frequency(signal)) || _decodes_signal(estimator, signal) ||
+            throw(ArgumentError(
+                "the vector-tracking estimator does not list $(nameof(typeof(signal))), " *
+                "which the core can arm as a driver; build it with every data signal of " *
+                "the core, plain or as the data component of a `pilot => data` pair"))
     end
     listed
 end

@@ -72,9 +72,14 @@ Current limitations:
   `NCOReferencedPLLAndDLL`. Its bandwidths are set for the whole loop; the
   per-arm `carrier_loop_bandwidth_hz` and `code_loop_bandwidth_hz` of an
   `ArmCommand` are not applied yet.
+- Every record of a satellite steps its one estimator state, the driver
+  channel's, whichever channel of the satellite completed it: the estimator
+  tells the driver's records from a passenger's. A passenger's record returns
+  the command in force; the satellite's word is its driver's.
 - Vector tracking (a `VectorPLLAndDLL` with an `NCOReferencedPLLAndDLL` inner
-  loop): data signals only — a pilot is refused as a driver and pilot/data
-  pairs (passengers) are refused altogether. All satellites share one
+  loop): a satellite is driven by a data signal, or by a pilot the estimator
+  pairs with its data component (`pilot => data`), whose passenger channel's
+  records it decodes. A pilot it does not pair is refused as a driver. All satellites share one
   navigation engine, and its cycle (the scalar PVT or the filter update) runs
   inside the service pass, in the `step_loop` of one record. Inter-system and
   inter-frequency biases are not published.
