@@ -1,5 +1,12 @@
 # Changelog
 
+# [1.1.0](https://github.com/JuliaGNSS/HardwareLoopCore.jl/compare/v1.0.2...v1.1.0) (2026-10-10)
+
+
+### Features
+
+* step every channel of a satellite through its estimator ([4271117](https://github.com/JuliaGNSS/HardwareLoopCore.jl/commit/42711174ef60f63d09002b808f5c5af9333cea0a)), closes [JuliaGNSS/TrackingLoops.jl#36](https://github.com/JuliaGNSS/TrackingLoops.jl/issues/36)
+
 ## [1.0.2](https://github.com/JuliaGNSS/HardwareLoopCore.jl/compare/v1.0.1...v1.0.2) (2026-10-06)
 
 
