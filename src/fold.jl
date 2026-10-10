@@ -23,6 +23,17 @@ end
     T.carrier_phase_offset[driver]
 end
 
+# The channel whose slot holds the estimator state of `ch`'s satellite: its own for
+# a driver, its driver channel's for a passenger, 0 for none (a noise reference, or
+# a passenger whose driver is not armed).
+@inline function _estimator_channel(core::LoopCore, ch::Int)
+    T = core.channels
+    T.signal_index[ch] == 1 && return ch
+    T.signal_index[ch] >= 2 || return 0
+    driver = T.driver_channel[ch]
+    driver != 0 && T.armed[driver] ? driver : 0
+end
+
 # Hand the channel's part-accumulated record to the loop and start a fresh one.
 # This is where the estimator steps, the events are published and the word to
 # be scheduled is refreshed. A no-op when nothing is accumulated.
@@ -53,9 +64,13 @@ function _emit_partial!(core::LoopCore, bank::ChannelBank, ch::Int)
         _driver_carrier_phase_offset(core, ch),
     )
     bank.states[ch] = state
-    # The loop: every record the driver component completes, unless this epoch
-    # is being folded observation-only (a stale backlog), in which case the
-    # bits and the C/N₀ are kept current and the filter is left alone.
+    # The loop: every record of the satellite, the driver's and its passengers',
+    # steps the satellite's one estimator state — the one in its driver channel's
+    # slot — unless this epoch is being folded observation-only (a stale backlog),
+    # in which case the bits and the C/N₀ are kept current and the filter is left
+    # alone. The record is built from the signal's state before its bits are
+    # published and drained below. A passenger's record returns the command in
+    # force; the satellite's word stays its driver's, which the passenger follows.
     flags = UInt32(0)
     band.noise_density_ready && (flags |= HardwareLoopProtocol.RECORD_HAS_CN0)
     _is_secondary_code_removed(core, ch) && (flags |= HardwareLoopProtocol.RECORD_OVERLAY_WIPED)
@@ -63,14 +78,17 @@ function _emit_partial!(core::LoopCore, bank::ChannelBank, ch::Int)
     timeline = T.timeline[ch]
     record_start = Int64(sample_end) - Int64(samples)
     applied_carrier, applied_code = mean_nco_word(timeline, record_start, Int64(sample_end))
-    if T.signal_index[ch] == 1 && !core.observation_only
-        record = LoopRecord(signal, filtered, previous_prompt, output, integrated_code_blocks, fs)
+    owner = _estimator_channel(core, ch)
+    if owner != 0 && !core.observation_only
+        record = LoopRecord(signal, filtered, previous_prompt, output, state, fs; prn = T.prn[ch])
         landing = _to_band(core, T.band[ch], core.current_landing)
-        est, carrier, code = step_loop(core.estimator, T.estimator[ch], record, timeline, landing)
-        T.estimator[ch] = est
-        T.carrier_doppler[ch] = ustrip(Hz, uconvert(Hz, carrier))
-        T.code_doppler[ch] = ustrip(Hz, uconvert(Hz, code))
-        T.word_dirty[ch] = true
+        est, carrier, code = step_loop(core.estimator, T.estimator[owner], record, timeline, landing)
+        T.estimator[owner] = est
+        if owner == ch
+            T.carrier_doppler[ch] = ustrip(Hz, uconvert(Hz, carrier))
+            T.code_doppler[ch] = ustrip(Hz, uconvert(Hz, code))
+            T.word_dirty[ch] = true
+        end
     end
     # Publish the record, then any bits it completed.
     ring = event_ring(core.segment, ch)

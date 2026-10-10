@@ -158,3 +158,40 @@ end
         @test f.core.channels.carrier_doppler[2] == f.core.channels.carrier_doppler[1]
     end
 end
+
+@testset "A passenger's records step its driver's estimator state" begin
+    # GPS L5: the Q pilot drives, the I data channel is its passenger. Every record
+    # of the satellite goes to `step_loop` with the state in the driver channel's
+    # slot; the scalar loop returns the command in force for the passenger's, so the
+    # driver's loop runs exactly as without it.
+    pilot, data = GPSL5Q(), GPSL5I()
+    function driver_dopplers(with_passenger)
+        f = scripted_fixture((pilot, data))
+        arm!(f, 1, 7; doppler = 100.0, code_phase = 0.0, sequence = 1, signal = "GPSL5Q", group_key = "L5-7")
+        with_passenger && arm!(f, 2, 7; doppler = 100.0, code_phase = 0.0, sequence = 2, signal = "GPSL5I",
+                               group_key = "L5-7", signal_index = 2)
+        service_pass!(f.core; wait_ms = 0)
+        passenger_state = f.core.channels.estimator[2]
+        for k = 1:40
+            f.dev.sample_count = Int64(k) * CORE_EPOCH
+            q_chip = GNSSSignals.secondary_value(get_secondary_code(pilot), 7, mod(k - 1, 20))
+            i_chip = GNSSSignals.secondary_value(get_secondary_code(data), 7, mod(k - 1, 10))
+            push!(f.dev.queue, epl_record(1, 7, f.dev.sample_count, cis(0.01k) * q_chip; code_phase = 0.0))
+            with_passenger && push!(f.dev.queue,
+                epl_record(2, 7, f.dev.sample_count, im * cis(0.01k) * i_chip; code_phase = 0.0))
+            push!(f.dev.queue, strobe_record(f.dev.sample_count))
+            service_pass!(f.core; wait_ms = 0)
+        end
+        if with_passenger
+            # The passenger's records reached the loop, and left its own slot alone.
+            @test f.core.channels.last_record_end[2] == f.core.channels.last_record_end[1] > 0
+            @test f.core.channels.estimator[2] == passenger_state
+        end
+        [(w[3], w[4]) for w in f.dev.words if w[1] == 1], f.core.channels.estimator[1]
+    end
+    alone, alone_state = driver_dopplers(false)
+    with_passenger, with_passenger_state = driver_dopplers(true)
+    @test !isempty(alone)
+    @test with_passenger == alone
+    @test with_passenger_state == alone_state
+end

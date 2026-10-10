@@ -56,7 +56,12 @@ BeiDou B1I, B1C, B2a, B2b, B3I). A loop serves the signal types passed to
 [`LoopCore`](@ref) at construction, mixed freely across channels. Overlay
 (secondary) codes are removed once their phase is known, code periods longer
 than `max_integration_time` are stepped in partial records, and a data
-component can ride on its pilot's NCO words as a passenger.
+component can ride on its pilot's NCO words as a passenger. Every record of a
+satellite, the driver's and each passenger's, is folded into its channel's
+`SignalLoopState` and stepped through the estimator with the satellite's one
+estimator state, kept in the driver channel's slot: the estimator, not the
+loop, decides what a passenger's record is for (a scalar loop returns the
+command in force).
 
 The test suite closes the loop through [`SimulatedDevice`](@ref) on GPS L1 C/A
 and checks GPS L5 (pilot with overlay, data passenger) and Galileo E1B (partial
