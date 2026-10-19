@@ -78,8 +78,10 @@ Current limitations:
   per-arm `carrier_loop_bandwidth_hz` and `code_loop_bandwidth_hz` of an
   `ArmCommand` are not applied yet.
 - Vector tracking (a `VectorPLLAndDLL` with an `NCOReferencedPLLAndDLL` inner
-  loop): data signals only — a pilot is refused as a driver and pilot/data
-  pairs (passengers) are refused altogether. All satellites share one
+  loop): a satellite is driven by a data signal, or by a pilot the estimator
+  pairs with its data component (`pilot => data`), whose passenger channel's
+  records it decodes. A pilot it does not pair is refused as a driver. All
+  satellites share one
   navigation engine, and its cycle (the scalar PVT or the filter update) runs
   inside the service pass, in the `step_loop` of one record. Inter-system and
   inter-frequency biases are not published.

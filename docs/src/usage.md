@@ -156,7 +156,10 @@ tag, solution = read_nav_snapshot(seg)
 solution.position_ecef_m, solution.flags & HLP.NAV_RUNNING != 0
 ```
 
-The estimator must list every data signal of the core. Its satellites are
+The estimator must list every data signal of the core, plain or as the data
+component of a `pilot => data` pair. A pilot drives a satellite only when the
+estimator pairs it, e.g. `VectorPLLAndDLL(GPSL1C_P() => GPSL1CA(); …)`, and
+the data component's channel is armed as its passenger. Its satellites are
 stepped from the records alone; the core gives each record the satellite's PRN
 and the replica's code phase, and keeps stepping them through a stale backlog
 so the engine never starves.
