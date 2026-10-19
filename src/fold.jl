@@ -34,6 +34,15 @@ end
     driver != 0 && T.armed[driver] ? driver : 0
 end
 
+# Whether the overlay is off the record about to be folded. The device replicates
+# the primary code only and the core wipes the overlay chip once sync stands, so
+# a record before that is primary-only, as TrackingLoops takes a pre-sync record
+# of a dataless signal to be. A device that wipes the overlay itself
+# (`SECONDARY_WIPEOFF`, reserved) gets TrackingLoops' default: wiped once synced.
+@inline _is_overlay_wiped(core::LoopCore, ch::Int, state) =
+    core.channels.secondary_wipe[ch] ? _is_secondary_code_removed(core, ch) :
+    has_bit_or_secondary_code_been_found(state)
+
 # Hand the channel's part-accumulated record to the loop and start a fresh one.
 # This is where the estimator steps, the events are published and the word to
 # be scheduled is refreshed. A no-op when nothing is accumulated.
@@ -48,7 +57,6 @@ function _emit_partial!(core::LoopCore, bank::ChannelBank, ch::Int)
     output = CorrelatorOutput(correlator, Int(samples), Int(sample_end))
     fs = T.sampling_freq[ch] * Hz
     state = bank.states[ch]
-    previous_prompt = state.last_filtered_prompt
     blocks_before = state.bit_buffer.prompt_accumulator_integrated_code_blocks
     bits_before = length(get_soft_bits(state))
     found_before = has_bit_or_secondary_code_been_found(state)
@@ -61,7 +69,8 @@ function _emit_partial!(core::LoopCore, bank::ChannelBank, ch::Int)
         fs,
         noise_density,
         band.noise_density_ready,
-        _driver_carrier_phase_offset(core, ch),
+        _driver_carrier_phase_offset(core, ch);
+        overlay_wiped = _is_overlay_wiped(core, ch, state),
     )
     bank.states[ch] = state
     # The loop: every record of the satellite, the driver's and its passengers',
@@ -80,7 +89,7 @@ function _emit_partial!(core::LoopCore, bank::ChannelBank, ch::Int)
     applied_carrier, applied_code = mean_nco_word(timeline, record_start, Int64(sample_end))
     owner = _estimator_channel(core, ch)
     if owner != 0 && !core.observation_only
-        record = LoopRecord(signal, filtered, previous_prompt, output, state, fs; prn = T.prn[ch])
+        record = LoopRecord(signal, filtered, output, state, fs; prn = T.prn[ch])
         landing = _to_band(core, T.band[ch], core.current_landing)
         est, carrier, code = step_loop(core.estimator, T.estimator[owner], record, timeline, landing)
         T.estimator[owner] = est
