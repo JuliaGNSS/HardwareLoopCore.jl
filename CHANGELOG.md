@@ -1,11 +1,35 @@
 # Changelog
 
-# [1.2.0](https://github.com/JuliaGNSS/HardwareLoopCore.jl/compare/v1.1.0...v1.2.0) (2026-10-19)
+# [2.0.0](https://github.com/JuliaGNSS/HardwareLoopCore.jl/compare/v1.1.0...v2.0.0) (2026-10-19)
+
+
+* feat!: run vector tracking and publish its solution on protocol 2 ([e97f877](https://github.com/JuliaGNSS/HardwareLoopCore.jl/commit/e97f8774f3aa0e8fc5b7568111201a0ef0efd661))
+* feat!: take each band's intermediate frequency from the band table ([76f6772](https://github.com/JuliaGNSS/HardwareLoopCore.jl/commit/76f677202f9f63844714bf3c2c9b2a5b8a206a1b)), closes [JuliaGNSS/TrackingLoops.jl#35](https://github.com/JuliaGNSS/TrackingLoops.jl/issues/35)
 
 
 ### Features
 
 * **deps:** require TrackingLoops 5 ([c1d8229](https://github.com/JuliaGNSS/HardwareLoopCore.jl/commit/c1d822964022d85cba4836beb9a53062ebc245f0))
+* range on a pilot paired with its data component in vector mode ([b31f48a](https://github.com/JuliaGNSS/HardwareLoopCore.jl/commit/b31f48a6b15019e8f84a025b1c88205272d846ee)), closes [#17](https://github.com/JuliaGNSS/HardwareLoopCore.jl/issues/17)
+
+
+### BREAKING CHANGES
+
+* requires HardwareLoopProtocol 3 (BandEntry gained the
+IF; 2.x receivers refuse the segment). LoopCore throws an ArgumentError
+when the segment's band table is not the driver's; create the segment
+with `bands = driver_capabilities(driver).bands`. A driver for a front
+end with a non-zero IF must report it in its BandEntry and apply it to
+its carrier NCOs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+* requires HardwareLoopProtocol 2 (the nav ring layout;
+1.x receivers refuse the segment). LoopCore has two
+more type parameters (the estimator and the channel table), so code that
+spells LoopCore{D,Banks} must use LoopCore{D,Banks,E,CT} or drop the
+parameters. Rebuild the receiver against HardwareLoopProtocol 2.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 
 # [1.1.0](https://github.com/JuliaGNSS/HardwareLoopCore.jl/compare/v1.0.2...v1.1.0) (2026-10-10)
 
