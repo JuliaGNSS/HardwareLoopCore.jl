@@ -22,8 +22,9 @@ mutable struct SimulatedChannel
     code_length::Float64        # chips
     tap_shifts::NTuple{SIM_MAX_TAPS,Int32}   # samples, latest tap first
     num_taps::Int
-    # The replica amplitude the arm declared: the device's accumulators carry
-    # it, as the gateware's ±127 carrier ROM does.
+    # The replica and code amplitudes the arm declared: the device's
+    # accumulators carry both, as the gateware's ±127 carrier ROM and an integer
+    # code table (GNSSSignals' ±25/±13 CBOC) do. `get_code` is unit RMS.
     gain::Float64
     accumulators::MVector{SIM_MAX_TAPS,ComplexF64}
     integrated_samples::Int
@@ -190,7 +191,7 @@ function arm!(dev::SimulatedDevice, channel::Integer, spec::ArmSpec)
     )
     ch.tap_shifts = spec.tap_sample_shifts
     ch.num_taps = spec.num_taps
-    ch.gain = spec.replica_amplitude * spec.code_amplitude / Float64(get_code_amplitude(spec.signal))
+    ch.gain = spec.replica_amplitude * spec.code_amplitude
     ch.accumulators .= 0
     ch.integrated_samples = 0
     ch.assignment_start = dev.sample_count

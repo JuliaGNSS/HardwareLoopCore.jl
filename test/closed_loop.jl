@@ -79,6 +79,20 @@ end
     @test abs(r.device_code_error) < 0.1
 end
 
+@testset "A CBOC satellite and noise reference read the true C/N₀ (code amplitude $code_amplitude)" for code_amplitude in
+                                                                                                    (1.0, get_code_amplitude(GalileoE1B()))
+    # Galileo E1B against an E1B noise reference, declared as a unit-RMS replica
+    # or as GNSSSignals' integer CBOC table (RMS ≈ 19.9), the one Tracking.jl
+    # correlates with: the density is the unit-variance noise's and the C/N₀
+    # the satellite's, 48 dBHz less the BOC code jitter of a second's tracking,
+    # either way. Before, a CBOC reference read the density 26 dB high.
+    r = run_closed_loop(; seconds = 1.0, signal = GalileoE1B(), code_amplitude, bit_samples = 16_000)
+    @test 41 < 10log10(r.states[end][2].cn0_linear_hz) < 50
+    @test 0.8 < r.f.core.bands[1].noise_density * CORE_FS < 1.25
+    @test abs(r.device_doppler - r.true_doppler) < 15.0
+    @test abs(r.device_code_error) < 0.1
+end
+
 @testset "A warm service pass allocates nothing" begin
     r = run_closed_loop(; seconds = 1.0, warmup_chunks = 200)
     @test r.allocated == 0

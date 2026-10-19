@@ -95,7 +95,13 @@ function _arm_in_bank!(bank::ChannelBank, core::LoopCore, ch::Int, cmd::ArmComma
     signal = bank.signal
     bank.states[ch] = reset_signal_state(bank.states[ch])
     bank.partial[ch] = zero(bank.template)
-    T.scale[ch] = cmd.replica_amplitude * cmd.code_amplitude / Float64(get_code_amplitude(signal))
+    # A satellite's records are scaled to the software correlator's, which still
+    # carry the signal's code amplitude (the loop's `normalize` divides it out);
+    # the noise reference's density is per unit code amplitude, so its own
+    # scale divides it out here.
+    device_gain = cmd.replica_amplitude * cmd.code_amplitude
+    T.scale[ch] =
+        cmd.signal_index == 0 ? device_gain : device_gain / Float64(get_code_amplitude(signal))
     T.carrier_phase_offset[ch] = Float64(get_carrier_phase_offset(signal))
     T.secondary_wipe[ch] =
         get_secondary_code_length(signal) > 1 &&
