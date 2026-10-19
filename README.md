@@ -72,7 +72,8 @@ service_pass!(core; wait_ms = 0)
 - One estimator per core, by default TrackingLoops' `NCOReferencedPLLAndDLL`.
   Its bandwidths are set loop-wide; the per-arm bandwidths of an `ArmCommand`
   are not applied yet.
-- Vector tracking (`VectorPLLAndDLL`): data signals only, one shared engine,
+- Vector tracking (`VectorPLLAndDLL`): a data signal or a paired pilot drives
+  each satellite, one shared engine,
   and the navigation cycle runs inside the service pass.
 - A record carries at most five taps and ten tap × antenna values.
 - With several antennas there is no beamforming, and the antennas are taken to

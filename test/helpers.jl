@@ -33,7 +33,7 @@ core_tap_shifts(core) = HardwareLoopCore._template_tap_shifts(core.banks[1].temp
 function arm!(f, channel, prn; doppler, code_phase, signal_index = 1, sequence, signal = get_signal_id(CORE_SYSTEM),
               valid_at_sample = 0, replica_amplitude = 1.0, num_taps = 3, sampling_freq_hz = CORE_FS,
               band = 1, group_key = signal, want_taps = false,
-              secondary_code_mode = HLP.SECONDARY_PRIMARY_ONLY)
+              secondary_code_mode = HLP.SECONDARY_PRIMARY_ONLY, tap_sample_shifts = core_tap_shifts(f.core))
     cmd = ArmCommand(;
         signal,
         prn,
@@ -42,7 +42,7 @@ function arm!(f, channel, prn; doppler, code_phase, signal_index = 1, sequence, 
         code_doppler_hz = doppler / 1540,
         code_phase_chips = code_phase,
         valid_at_sample,
-        tap_sample_shifts = core_tap_shifts(f.core),
+        tap_sample_shifts,
         num_taps,
         sampling_freq_hz,
         replica_amplitude,

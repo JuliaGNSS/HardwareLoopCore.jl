@@ -131,12 +131,12 @@ function _handle_arm!(core::LoopCore, tag::CommandTag, cmd::ArmCommand)
     1 <= ch <= core.num_channels || return _reject!(core, tag, HardwareLoopProtocol.REJECT_NO_SUCH_CHANNEL)
     bank = _bank_index_by_name(core, cmd.signal)
     bank == 0 && return _reject!(core, tag, HardwareLoopProtocol.REJECT_UNSUPPORTED_SIGNAL)
-    # Vector tracking drives a satellite with a signal its estimator decodes
-    # (never a dataless pilot), and has no pilot/data pairs yet.
+    # Vector tracking drives a satellite with a signal its estimator ranges on:
+    # a data signal, or a pilot it pairs with its data component. Any signal may
+    # be a passenger; the estimator decodes the one it pairs with the driver.
     if _is_vector(core)
         cmd.signal_index == 1 && !core.vector_banks[bank] &&
             return _reject!(core, tag, HardwareLoopProtocol.REJECT_UNSUPPORTED_SIGNAL)
-        cmd.signal_index >= 2 && return _reject!(core, tag, HardwareLoopProtocol.REJECT_BAD_CONFIG)
     end
     band = Int(cmd.band)
     1 <= band <= length(core.bands) || return _reject!(core, tag, HardwareLoopProtocol.REJECT_BAD_CONFIG)
