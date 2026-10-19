@@ -1,5 +1,12 @@
 # Changelog
 
+# [1.2.0](https://github.com/JuliaGNSS/HardwareLoopCore.jl/compare/v1.1.0...v1.2.0) (2026-10-19)
+
+
+### Features
+
+* **deps:** require TrackingLoops 5 ([c1d8229](https://github.com/JuliaGNSS/HardwareLoopCore.jl/commit/c1d822964022d85cba4836beb9a53062ebc245f0))
+
 # [1.1.0](https://github.com/JuliaGNSS/HardwareLoopCore.jl/compare/v1.0.2...v1.1.0) (2026-10-10)
 
 
