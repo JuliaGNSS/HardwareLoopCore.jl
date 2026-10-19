@@ -1,6 +1,6 @@
 # Changelog
 
-# [2.0.0](https://github.com/JuliaGNSS/HardwareLoopCore.jl/compare/v1.1.0...v2.0.0) (2026-10-19)
+# [2.0.0](https://github.com/JuliaGNSS/HardwareLoopCore.jl/compare/v1.2.0...v2.0.0) (2026-10-19)
 
 
 * feat!: run vector tracking and publish its solution on protocol 2 ([e97f877](https://github.com/JuliaGNSS/HardwareLoopCore.jl/commit/e97f8774f3aa0e8fc5b7568111201a0ef0efd661))
@@ -9,7 +9,6 @@
 
 ### Features
 
-* **deps:** require TrackingLoops 5 ([c1d8229](https://github.com/JuliaGNSS/HardwareLoopCore.jl/commit/c1d822964022d85cba4836beb9a53062ebc245f0))
 * range on a pilot paired with its data component in vector mode ([b31f48a](https://github.com/JuliaGNSS/HardwareLoopCore.jl/commit/b31f48a6b15019e8f84a025b1c88205272d846ee)), closes [#17](https://github.com/JuliaGNSS/HardwareLoopCore.jl/issues/17)
 
 
