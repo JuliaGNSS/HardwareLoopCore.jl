@@ -21,7 +21,14 @@ end
         push!(f.dev.queue, l5q_record(signal, 1, 7, k), strobe_record(k * CORE_EPOCH))
         service_pass!(f.core; wait_ms = 0)
     end
-    foreach(feed!, 1:200)
+    polarity() = f.core.banks[1].states[1].last_carrier_phase_polarity
+    # Before sync the record's sign is unknown to the loop; once the overlay is
+    # wiped it is the prompt's, and the loop reads it with the four-quadrant
+    # discriminators.
+    feed!(1)
+    @test polarity() == 0
+    foreach(feed!, 2:200)
+    @test polarity() == 1
     ev = drain_events!(f, 1)
     @test ev.states[end][2].flags & HLP.STATE_SYNC_FOUND != 0
     wiped = [r.flags & HLP.RECORD_OVERLAY_WIPED != 0 for (_, r) in ev.records]
@@ -35,6 +42,7 @@ end
     # wipe until sync re-seeds the phase.
     foreach(feed!, 202:203)
     @test f.core.channels.secondary_phase[1] == -1
+    @test polarity() == 0
     ev = drain_events!(f, 1)
     @test !(last(ev.records)[2].flags & HLP.RECORD_OVERLAY_WIPED != 0)
 end
