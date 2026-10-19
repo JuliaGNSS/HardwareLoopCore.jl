@@ -13,9 +13,9 @@ HardwareLoopCore = {path = ".."}
 
 [compat]
 GNSSSignals = "4"
-HardwareLoopProtocol = "1"
-Random = "1"
+HardwareLoopProtocol = "1, 3.0"
+Random = "<0.0.1, 1"
 StaticArrays = "1"
-Test = "1"
+Test = "<0.0.1, 1"
 TrackingLoops = "5"
 Unitful = "1"
