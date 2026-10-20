@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.1](https://github.com/JuliaGNSS/HardwareLoopCore.jl/compare/v2.0.0...v2.0.1) (2026-10-20)
+
+
+### Bug Fixes
+
+* read a CBOC noise reference's density per unit code amplitude ([45534a9](https://github.com/JuliaGNSS/HardwareLoopCore.jl/commit/45534a95aec8b2d1bd3db2a10b41a5036deec272))
+
 # [2.0.0](https://github.com/JuliaGNSS/HardwareLoopCore.jl/compare/v1.2.0...v2.0.0) (2026-10-19)
 
 
