@@ -99,9 +99,7 @@ function _nav_solution_event(cycle_index::Int, pvt, status)
     dop = pvt.dop
     flags = UInt32(0)
     status.vector_tracking_active && (flags |= HardwareLoopProtocol.NAV_RUNNING)
-    # The scalar fixes before the filter is seeded (and after it falls back)
-    # are the engine's own; the rest are the filter's.
-    (status.vector_tracking_active || status.fell_back) && (flags |= HardwareLoopProtocol.NAV_SOLUTION_FROM_FILTER)
+    status.solution_from_filter && (flags |= HardwareLoopProtocol.NAV_SOLUTION_FROM_FILTER)
     status.fell_back && (flags |= HardwareLoopProtocol.NAV_FELL_BACK)
     status.released && (flags |= HardwareLoopProtocol.NAV_RELEASED)
     iszero(position.x) && iszero(position.y) && iszero(position.z) || (flags |= HardwareLoopProtocol.NAV_VALID)

@@ -242,3 +242,17 @@ end
     @test all(sat.signal == FixedName(:GPSL1C_P) && sat.channel == 1 for (_, sat) in nav.satellites)
     @test all(sat.flags & HLP.NAV_SAT_BIT_OR_SECONDARY_CODE_SYNCED != 0 for (_, sat) in nav.satellites[end-1:end])
 end
+
+@testset "Only a cycle the navigation filter ran publishes the filter's solution" begin
+    # A scalar fix, the scalar fix that seeds the filter (vector tracking is
+    # active after that cycle), a filter update, and the filter's update on the
+    # cycle it falls back, as TrackingLoops reports them.
+    status(active, seeded, fell_back, from_filter) =
+        TrackingLoops.NavigationStatus(active, NaN * u"m", NaN * u"m", 0.0u"s", 0, seeded, fell_back, false, from_filter)
+    pvt = TrackingLoops.PositionVelocityTime.PVTSolution()
+    filter_solution(s) = HardwareLoopCore._nav_solution_event(1, pvt, s).flags & HLP.NAV_SOLUTION_FROM_FILTER != 0
+    @test !filter_solution(status(false, false, false, false))
+    @test !filter_solution(status(true, true, false, false))
+    @test filter_solution(status(true, false, false, true))
+    @test filter_solution(status(false, false, true, true))
+end
