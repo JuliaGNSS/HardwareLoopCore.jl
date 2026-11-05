@@ -181,6 +181,8 @@ function _handle_arm!(core::LoopCore, tag::CommandTag, cmd::ArmCommand)
         b = core.bands[band]
         b.noise_channel = ch
         b.noise_prn = Int(cmd.prn)
+        b.noise_replica_amplitude = cmd.replica_amplitude
+        b.noise_code_amplitude = cmd.code_amplitude
         b.noise_epochs_since_rearm = 0
         b.noise_power = 0.0
         b.noise_looks = 0
@@ -339,10 +341,12 @@ function _rearm_in_bank!(bank::ChannelBank, core::LoopCore, ch::Int, band_index:
     code_phase = _next_uniform!(b) * get_code_length(signal)
     carrier = (_next_uniform!(b) * 2 - 1) * 5000.0
     now = sample_count(core.driver, band_index)
+    # The amplitudes the receiver declared, which the channel's scale divides out.
     spec = ArmSpec(
         signal, prn, carrier, 0.0, code_phase, now,
         _template_tap_shifts(bank.template, T.sampling_frequency[ch], signal), get_num_correlators(bank.template),
-        band_index, Int(b.entry.rf_input), Int(b.entry.device_index), T.sampling_frequency[ch], 1.0, Float64(get_code_amplitude(signal)),
+        band_index, Int(b.entry.rf_input), Int(b.entry.device_index), T.sampling_frequency[ch],
+        b.noise_replica_amplitude, b.noise_code_amplitude,
     )
     outcome = arm!(core.driver, ch, spec)
     outcome.accepted || return nothing
