@@ -81,6 +81,7 @@ function _clear_channel!(core::LoopCore, ch::Int)
     T.anchor_code_phase[ch] = NaN
     T.bit_phase_anchored[ch] = false
     T.carrier_phase[ch] = 0.0
+    T.carrier_phase_sample[ch] = typemin(Int64)
     T.bit_index[ch] = 0
     T.records_folded[ch] = 0
     T.stale_records[ch] = 0

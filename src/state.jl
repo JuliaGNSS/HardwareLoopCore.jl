@@ -193,7 +193,10 @@ struct ChannelTable{E}
     anchor_sample::Vector{Int64}
     anchor_code_phase::Vector{Float64}
     bit_phase_anchored::Vector{Bool}
-    carrier_phase::Vector{Float64}   # cycles, dead-reckoned from the commands
+    # The replica's carrier phase, cycles and never wrapped: the carrier Doppler
+    # integrated over the NCO timeline from the arm to `carrier_phase_sample`.
+    carrier_phase::Vector{Float64}
+    carrier_phase_sample::Vector{Int64}
     # ── Bits ──────────────────────────────────────────────────────────────────
     bit_index::Vector{Int64}
     # ── Counters ──────────────────────────────────────────────────────────────
@@ -212,6 +215,7 @@ function ChannelTable(n::Integer, loop_state_template::E) where {E}
         zeros(Int64, n), zeros(Float64, n), zeros(Int, n), fill(typemin(Int64), n), fill(false, n), fill(NaN, n),
         fill(false, n), fill(-1, n), fill(typemin(Int64), n),
         zeros(Float64, n), fill(typemin(Int64), n), fill(typemin(Int64), n), fill(NaN, n), fill(false, n), zeros(Float64, n),
+        fill(typemin(Int64), n),
         zeros(Int64, n), zeros(Int64, n), zeros(Int64, n),
     )
 end

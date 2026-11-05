@@ -96,6 +96,9 @@ Current limitations:
 - C/N₀ needs a noise reference: one hardware channel per band armed on a
   decoy PRN, whose records fill TrackingLoops' `CorrelatorNoiseEstimator`
   window (one second). Without one, no C/N₀ is published.
+- The epoch state's carrier phase is never wrapped and restarts at zero on
+  every arm. The core detects no cycle slips and publishes no loss-of-lock
+  indicator: the protocol has no flag for phase lock.
 - [`overflowed_channels!`](@ref) is part of the driver API but the core does
   not read it yet. Lost records are detected from gaps in each channel's
   records instead.

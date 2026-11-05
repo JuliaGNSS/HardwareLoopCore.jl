@@ -141,6 +141,17 @@ tag, state = read_snapshot(snapshot_slot(seg, 1))
  synchronised = state.flags & HLP.STATE_SYNC_FOUND != 0)
 ```
 
+The epoch state's `carrier_phase_cycles` is the carrier-phase measurement
+(RINEX `L`): the carrier Doppler integrated over the channel's NCO commands
+since the device started it, never wrapped, plus, in the vector loop,
+TrackingLoops' `calc_carrier_phase_correction`, the residual PLL's prediction
+of how far the carrier leads the replica. It starts at zero on every arm, so a
+re-arm is a loss of lock. It is ambiguous by half a cycle under the Costas
+discriminator, and it steps where the loop does not follow the carrier
+continuously: by half a cycle when a pilot's sync makes the discriminator
+four-quadrant, and when a satellite is released from the vector loop. The
+core detects no cycle slips and publishes no loss-of-lock indicator.
+
 ## Vector tracking
 
 Built with TrackingLoops' `VectorTrackingLoop`, the core closes every satellite's

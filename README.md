@@ -81,6 +81,8 @@ service_pass!(core; wait_ms = 0)
 - With several antennas there is no beamforming; the noise reference measures
   the antennas' noise covariance.
 - C/N₀ needs a noise reference: one hardware channel per band.
+- The carrier phase is never wrapped and restarts on every arm; no cycle-slip
+  detection or loss-of-lock indicator.
 - `overflowed_channels!` is part of the driver API but not read by the core yet.
 - `SimulatedDevice` is for tests: one band, one antenna, not real-time.
 

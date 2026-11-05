@@ -172,4 +172,12 @@ end
         @test isfinite(s.residual_m) && s.cn0_dbhz > 35
     end
     @test r.core.nav_events_published == length(r.solutions) + length(r.satellites)
+    # In the vector loop the published carrier phase adds the residual PLL's
+    # correction to the replica's: the filter sets the carrier NCO without
+    # steering it onto the carrier.
+    corrections = map(eachindex(ION_PRNS)) do ch
+        _, state = read_snapshot(snapshot_slot(r.seg, ch))
+        state.carrier_phase_cycles - r.core.channels.carrier_phase[ch]
+    end
+    @test all(isfinite, corrections) && any(!iszero, corrections)
 end

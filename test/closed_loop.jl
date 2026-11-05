@@ -53,6 +53,17 @@ end
     @test last_state.flags & HLP.STATE_CODE_PHASE_ANCHORED != 0
     @test last_state.flags & HLP.STATE_BIT_PHASE_ANCHORED != 0
     @test abs(last_state.carrier_doppler_hz - r.true_doppler) < 15.0
+    # The carrier phase is the replica's, integrated over the NCO commands: the
+    # device's own NCO phase where the last epoch ends on its counter, and over
+    # the last half second the true carrier's advance, to the phase-locked
+    # loop's error.
+    last_tag = r.states[end][1]
+    if last_tag.device_sample == r.f.dev.sample_count
+        @test last_state.carrier_phase_cycles ≈ r.f.dev.channels[1].carrier_phase atol = 1e-6
+    end
+    earlier_tag, earlier_state = r.states[end-500]
+    advance = r.true_doppler * (last_tag.device_sample - earlier_tag.device_sample) / CORE_FS
+    @test abs(last_state.carrier_phase_cycles - earlier_state.carrier_phase_cycles - advance) < 0.05
     # C/N₀ from the noise reference: 0.126² · 4 MS/s against unit variance is
     # 48 dBHz; allow the C/N₀ estimator's spread.
     @test 44 < 10log10(last_state.cn0_linear_hz) < 50
