@@ -92,10 +92,11 @@ Current limitations:
   correlators × antennas ([`MAX_RECORD_CORRELATOR_OUTPUTS`](@ref)).
 - With several antennas, each satellite runs TrackingLoops'
   `DefaultPostCorrFilter`, which takes the last antenna. The noise reference
-  measures one density, and the antennas are taken to see equal, uncorrelated
-  noise.
+  measures the antennas' noise covariance, which each satellite's C/N₀ reads
+  through the filter's weights.
 - C/N₀ needs a noise reference: one hardware channel per band armed on a
-  noise probe. Without one, no C/N₀ is published.
+  noise probe, whose records fill TrackingLoops' `CorrelatorNoiseDensityEstimator`
+  window (one second). Without one, no C/N₀ is published.
 - [`overflowed_channels!`](@ref) is part of the driver API but the core does
   not read it yet. Lost records are detected from gaps in each channel's
   records instead.

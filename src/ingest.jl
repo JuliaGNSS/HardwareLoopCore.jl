@@ -311,23 +311,44 @@ end
 
 # ── One record in ────────────────────────────────────────────────────────────
 
-# Pool one noise-reference record: every meaningful correlator output of every
-# antenna is an independent look at the floor, and `Σ|b|²` over them is what the
-# per-antenna density is measured from. The record is on the software
-# correlator's scale, which carries the signal's code amplitude; the density is
-# per unit code amplitude, the scale the loop's normalised prompt is on.
-function _pool_noise_record!(bank::ChannelBank, core::LoopCore, ch::Int, band::Int, record::DeviceRecord)
-    b = core.bands[band]
-    n = min(Int(record.num_correlators) * max(1, Int(record.num_ants)), MAX_RECORD_CORRELATOR_OUTPUTS)
-    power = 0.0
-    @inbounds for i = 1:n
-        power += abs2(record.correlator_outputs[i])
-    end
-    code_amplitude = Float64(get_code_amplitude(bank.signal))
-    b.noise_power += power / (code_amplitude * code_amplitude)
-    b.noise_looks += n
-    b.noise_samples_per_look = Int(record.num_integrated_samples)
+# Append one noise-reference record to its band's noise window: the record's
+# correlator outputs, on the satellites' scale as every record is, go to
+# TrackingLoops' `append_noise_correlator_outputs!`, which pools their squared
+# magnitudes — one power sum for one antenna, the spatial covariance `Σ b·bᴴ`
+# for several — over the record's own sample count.
+function _append_noise_record!(bank::ChannelBank, core::LoopCore, ch::Int, record::DeviceRecord)
+    T = core.channels
+    b = core.bands[T.band[ch]]
+    signal = bank.signal
+    probe = TrackingLoops.NoiseProbe(
+        signal,
+        b.noise_prn,
+        b.noise_code_phase,
+        get_chip_rate(signal),
+        (b.entry.intermediate_frequency_hz + b.noise_carrier_doppler) * Hz,
+    )
+    TrackingLoops.append_noise_correlator_outputs!(
+        b.noise_estimator,
+        probe,
+        _noise_correlator_outputs(NumAnts(b.noise_estimator), record),
+        Int(record.num_integrated_samples),
+        T.sampling_frequency[ch] * Hz,
+    )
     nothing
+end
+
+# A record's meaningful correlator outputs as
+# `append_noise_correlator_outputs!` takes them: one `ComplexF64` per correlator
+# for a single antenna, an `SVector{M}` per correlator for `M` (the record is
+# antenna-major). Lazy, so nothing is allocated.
+@inline function _noise_correlator_outputs(::NumAnts{1}, record::DeviceRecord)
+    outputs = record.correlator_outputs
+    (outputs[i] for i = 1:min(Int(record.num_correlators), MAX_RECORD_CORRELATOR_OUTPUTS))
+end
+@inline function _noise_correlator_outputs(::NumAnts{M}, record::DeviceRecord) where {M}
+    outputs = record.correlator_outputs
+    num_correlators = min(Int(record.num_correlators), MAX_RECORD_CORRELATOR_OUTPUTS ÷ M)
+    (SVector{M,ComplexF64}(ntuple(a -> outputs[(a-1)*num_correlators+i], Val(M))) for i = 1:num_correlators)
 end
 
 function _ingest_in_bank!(bank::ChannelBank, core::LoopCore, ch::Int, record::DeviceRecord)
@@ -353,8 +374,8 @@ end
     ingest_record!(core, record)
 
 Route one device record: drop it as stale when its channel is free, unconfirmed,
-holds another PRN or its integration began before the confirmed arm; pool it
-into its band's noise reference when the channel is one; otherwise add it to
+holds another PRN or its integration began before the confirmed arm; append it
+to its band's noise window when the channel is the noise reference; otherwise add it to
 the channel's open integration, stepping the loop whenever one is
 completed.
 """
@@ -377,7 +398,7 @@ function ingest_record!(core::LoopCore, record::DeviceRecord)
         return nothing
     end
     if T.signal_index[ch] == 0
-        with_bank(_pool_noise_record!, core, ch, core, ch, T.band[ch], record)
+        with_bank(_append_noise_record!, core, ch, core, ch, record)
         return nothing
     end
     with_bank(_ingest_in_bank!, core, ch, core, ch, record)

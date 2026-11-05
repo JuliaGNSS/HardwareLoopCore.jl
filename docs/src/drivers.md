@@ -103,6 +103,6 @@ and ≈19.9 for the integer CBOC table Tracking.jl correlates with; `get_code`
 itself is unit RMS). Only the driver knows its device's replica, so it divides
 the raw sums by its carrier table's gain (e.g. 127 for a ±127 table) times its
 code table's RMS over the signal's code amplitude; the receiver declares no
-amplitudes. TrackingLoops divides the signal's code amplitude out of a
-satellite's prompt, and the core out of the noise reference's density, so the
-C/N₀ is independent of the device's scale and of the signal's modulation.
+amplitudes. TrackingLoops then divides the signal's code amplitude out of a
+satellite's prompt and out of the noise reference's density alike, so the C/N₀
+is independent of the device's scale and of the signal's modulation.

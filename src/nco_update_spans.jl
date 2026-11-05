@@ -57,6 +57,13 @@ end
     driver != 0 && T.armed[driver] ? driver : 0
 end
 
+# The band's noise density for the C/N₀, and whether a C/N₀ estimator may read
+# it: only once the noise window is ready.
+@inline function _noise_density_and_ready(band::BandState)
+    density, status = TrackingLoops.get_noise_density_and_status(band.noise_estimator)
+    density, status == TrackingLoops.NOISE_DENSITY_READY
+end
+
 # A C/N₀ in dB-Hz as the plain number a protocol record carries; `-Inf` for no
 # estimate.
 @inline _dbhz(cn0) = Float64(ustrip(cn0))
@@ -86,7 +93,7 @@ function _emit_integration!(core::LoopCore, bank::ChannelBank, ch::Int)
         correlator_bank, Int(samples), Int(sample_end), _integration_code_phase(core, signal, ch, sample_end))
     fs = T.sampling_frequency[ch] * Hz
     offset = _sample_index_offset(core, T.band[ch])
-    noise_density = _noise_density(bank.template, band.noise_density / Hz)
+    noise_density, noise_density_ready = _noise_density_and_ready(band)
     state = bank.states[ch]
     # A passenger's driver may be armed, or re-armed on another component, after it.
     driver_carrier_phase_offset = _driver_carrier_phase_offset(core, ch)
@@ -98,7 +105,7 @@ function _emit_integration!(core::LoopCore, bank::ChannelBank, ch::Int)
         output,
         fs,
         noise_density,
-        band.noise_density_ready;
+        noise_density_ready;
         secondary_code_wiped = _is_secondary_code_wiped(core, ch, state),
         sample_index_offset = offset,
     )
@@ -143,7 +150,7 @@ function _emit_integration!(core::LoopCore, bank::ChannelBank, ch::Int)
         signal_index = T.signal_index[ch],
         num_correlators = get_num_correlators(bank.template),
     )
-    cn0 = band.noise_density_ready ? _dbhz(estimate_cn0(state)) : -Inf
+    cn0 = noise_density_ready ? _dbhz(estimate_cn0(state)) : -Inf
     publish!(
         ring,
         tag,
@@ -201,13 +208,6 @@ function _emit_integration!(core::LoopCore, bank::ChannelBank, ch::Int)
     nothing
 end
 
-# The noise floor in the shape the estimators combine with the antenna weights:
-# the density for one antenna, the covariance `N₀·I` for `M` — the noise
-# reference measures one density, so the antennas are taken to see equal,
-# uncorrelated noise.
-@inline _noise_density(::AbstractCorrelatorBank{1}, density) = density
-@inline _noise_density(::AbstractCorrelatorBank{M}, density) where {M} =
-    SMatrix{M,M}(ntuple(i -> (i - 1) % (M + 1) == 0 ? density : zero(density), Val(M * M)))
 # The correlator bank's outputs as the fixed tuple a `CorrelatorOutputsEvent` carries.
 @inline function _pack_correlator_outputs(correlator_bank::AbstractCorrelatorBank{1})
     outputs = get_correlator_outputs(correlator_bank)
@@ -321,7 +321,7 @@ function _publish_loop_state!(bank::ChannelBank, core::LoopCore, ch::Int, nco_up
     core.loop_open && (flags |= HardwareLoopProtocol.STATE_LOOP_OPEN)
     boundary = _to_band(core, T.band[ch], nco_update_boundary)
     nco_command = get_nco_command(T.nco_timeline[ch], boundary)
-    cn0 = band.noise_density_ready ? _dbhz(estimate_cn0(state)) : -Inf
+    cn0 = last(_noise_density_and_ready(band)) ? _dbhz(estimate_cn0(state)) : -Inf
     ev = LoopStateEvent(
         T.carrier_doppler[ch],
         T.code_doppler[ch],
@@ -437,28 +437,10 @@ end
 
 # ── The noise reference ──────────────────────────────────────────────────────
 
-# Close this span's pooled looks into a density observation and slide the
-# window: `N₀ = Σ|b|² / (looks · samples_per_look · fs)` (unit code amplitude;
-# the reference and the satellites share the device's scale, which divides out
-# of the C/N₀ ratio).
+# Count the NCO updates the band's noise reference has sat on its noise probe; the records
+# themselves went into the noise window as they arrived.
 function _close_noise_nco_update_span!(core::LoopCore, band_index::Int)
-    b = core.bands[band_index]
-    if b.noise_looks > 0 && b.noise_samples_per_look > 0
-        density = b.noise_power / (b.noise_looks * b.noise_samples_per_look * b.entry.sampling_frequency_hz)
-        b.noise_window_index = mod(b.noise_window_index, NOISE_WINDOW_LENGTH) + 1
-        b.noise_window[b.noise_window_index] = density
-        b.noise_window_count = min(b.noise_window_count + 1, NOISE_WINDOW_LENGTH)
-        total = 0.0
-        @inbounds for i = 1:b.noise_window_count
-            total += b.noise_window[i]
-        end
-        mean = total / b.noise_window_count
-        b.noise_density = mean
-        b.noise_density_ready = isfinite(mean) && mean > 0
-    end
-    b.noise_power = 0.0
-    b.noise_looks = 0
-    b.noise_nco_updates_since_rearm += 1
+    core.bands[band_index].noise_nco_updates_since_rearm += 1
     nothing
 end
 

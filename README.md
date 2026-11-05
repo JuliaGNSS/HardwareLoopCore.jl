@@ -78,8 +78,8 @@ service_pass!(core; wait_ms = 0)
 - A record carries at most five correlators and ten correlator outputs
   (correlators × antennas).
 - With several antennas the satellites run TrackingLoops'
-  `DefaultPostCorrFilter`, which takes the last antenna, and the antennas are
-  taken to see equal, uncorrelated noise.
+  `DefaultPostCorrFilter`, which takes the last antenna; the noise reference
+  measures the antennas' noise covariance.
 - C/N₀ needs a noise reference: one hardware channel per band.
 - `overflowed_channels!` is part of the driver API but not read by the core yet.
 - `SimulatedDevice` is for tests: one band, one antenna, not real-time.
