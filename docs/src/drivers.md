@@ -12,9 +12,9 @@ A driver implements these methods:
 
 | Method | Called | Does |
 |---|---|---|
-| [`driver_capabilities`](@ref)`(d)` | once, when the core is built | the channel count, the widest tap layout, the antennas and the band table |
+| [`driver_capabilities`](@ref)`(d)` | once, when the core is built | the channel count, the most correlators per record, the antennas and the band table |
 | [`read_records!`](@ref)`(d, records)` | every pass | appends every new [`DeviceRecord`](@ref) and returns how many; never blocks |
-| [`write_word!`](@ref)`(d, ch, carrier_hz, code_hz)` | after a fold that stepped `ch` | commits the NCO word, effective on the next sample |
+| [`write_nco_command!`](@ref)`(d, ch, carrier_doppler_hz, code_doppler_hz)` | after an interval that stepped `ch` closes | commits the NCO command, effective on the next sample |
 | [`arm!`](@ref)`(d, ch, spec)` | on an arm command, and on a noise-reference re-arm | programs the replica in the [`ArmSpec`](@ref); returns [`ARM_ACCEPTED`](@ref) or [`arm_rejected`](@ref)`(reason)` |
 | [`release!`](@ref)`(d, ch)` | on a release command, or a failed arm | stops the channel |
 | [`assignment_start`](@ref)`(d, ch)` | every pass while an arm is unconfirmed, and per record | the sample the current assignment took effect at |
@@ -33,7 +33,7 @@ Each band in [`DriverCapabilities`](@ref) is a `BandEntry`, and its
 `intermediate_frequency_hz` is where a signal at zero Doppler sits in the band's
 samples. The core and the receiver deal in Dopplers only: the driver runs every
 carrier NCO of the band at that IF plus the Doppler the core commands, in
-[`arm!`](@ref) and [`write_word!`](@ref) alike.
+[`arm!`](@ref) and [`write_nco_command!`](@ref) alike.
 
 Report the IF the front end actually produces, including any fixed offset its
 tuning leaves. An RTL-SDR's LO synthesizer, for one, lands a fixed number of Hz
@@ -49,47 +49,49 @@ same IF from the segment, for example to acquire around it.
 
 - A **correlator dump** of one channel: the PRN the channel ran, the sample
   index at the *end* of the integration, the number of samples integrated, and
-  the raw accumulator sums, latest tap first and antenna-major (pack them with
-  [`pack_taps`](@ref)). If the device knows the replica's code phase at the end
-  of the integration, report it in chips; it anchors the absolute code phase
+  correlator outputs, the raw sums from the latest replica to the earliest,
+  antenna-major (pack them with [`pack_correlator_outputs`](@ref)). If the device knows the replica's code phase at the end
+  of the integration, report it in chips; it pins down the absolute code phase
   the receiver forms pseudoranges from. Otherwise leave it `NaN`.
-- An **epoch strobe** ([`strobe_record`](@ref)): a marker on the reference
-  band's counter. The core folds an epoch once a record past its boundary has
-  arrived; the strobes keep the epoch clock moving when no channel is armed.
+- A **timebase strobe** ([`strobe_record`](@ref)): a marker on the reference
+  band's counter. The core closes an NCO update interval once a record past its
+  boundary has arrived; the strobes keep the timebase moving when no channel is
+  armed.
 
 The records must tile each channel's sample axis: a dump starts where the
 previous one ended. The core infers a lost record from a gap, restarts the
-navigation bit clock, and counts it. A dump normally ends on a primary-code
-boundary; a device may also cut dumps inside a code period, and the core
-accumulates them up to the boundary.
+navigation bit clock, and counts it. A dump normally ends on a primary code
+period boundary; a device may also cut dumps inside a code period, and the
+core sums them up to the boundary.
 
-The tap layout of a dump must match the layout the core's correlator expects
-for the signal (three taps for the default early–prompt–late correlator);
-dumps with another tap count are counted in `tap_layout_mismatches` and
+A dump must carry as many correlators as the core's correlator bank expects
+for the signal (three for the default early–prompt–late correlator bank);
+dumps with another count are counted in `correlator_layout_mismatches` and
 dropped.
 
 ## Timing
 
-The sample index of a record, the `valid_at_sample` of an [`ArmSpec`](@ref),
+The sample index of a record, the `application_sample_index` of an [`ArmSpec`](@ref),
 [`assignment_start`](@ref) and [`sample_count`](@ref) all count the same
 free-running device samples on the channel's band. Band 1 is the reference:
 its counter is the receiver timebase, and other bands are scaled onto it by
 their sampling frequencies.
 
-An arm describes the satellite at `valid_at_sample`, which may lie in the
+An arm describes the satellite at `application_sample_index`, which may lie in the
 past: the device propagates the code phase to the sample it actually starts
 at, and reports that sample through [`assignment_start`](@ref). Until then it
 returns `typemax(Int64)`, and the core drops the channel's records as stale. If
 the device cannot start the assignment after all, it returns `typemin(Int64)`;
 the core rejects the arm towards the receiver and releases the channel.
 
-A word written with [`write_word!`](@ref) applies from the device's next
-sample. The core reads [`sample_count`](@ref) right after the write and
-corrects the channel's NCO timeline to where the word really landed, so a
-record that straddles a word change is credited with the weighted mean of both
-words. Records may arrive late — the delay-aware estimator accounts for the
-words committed since — but the shorter the record-to-word latency, the
-tighter the loop.
+A command written with [`write_nco_command!`](@ref) applies from the device's
+next sample. The core reads [`sample_count`](@ref) right after the write and
+confirms the command in the channel's NCO timeline at the sample it really
+took effect at, so a record that straddles a command change is credited with
+the weighted mean of both commands; a command the driver refuses is cancelled
+from the timeline. Records may arrive late — the delay-compensated tracking
+loop accounts for the commands written since — but the shorter the
+record-to-command latency, the tighter the loop.
 
 ## Amplitudes
 

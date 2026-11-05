@@ -1,6 +1,6 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # One service pass, and the loop around it:
-#   wait for records → read → fold closed epochs → commit the words →
+#   wait for records → read → close intervals → commit the NCO commands →
 #   drain commands → confirm arms → re-arm noise references → heartbeat.
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -12,25 +12,25 @@ most `wait_ms` when nothing is pending, and never otherwise.
 """
 function service_pass!(core::LoopCore; wait_ms::Integer = 1)
     t0 = time_ns()
-    nav_cycle = core.last_nav_cycle
+    nav_cycle_index = core.last_nav_cycle_index
     wait_records(core.driver, wait_ms)
     taken = take_records!(core)
     now_reference = sample_count(core.driver, 1)
     if taken > 0 && core.latest_sample_index != typemin(Int64)
-        age_us = round(Int64, (now_reference - core.latest_sample_index) * 1e6 / core.bands[1].entry.sampling_freq_hz)
+        age_us = round(Int64, (now_reference - core.latest_sample_index) * 1e6 / core.bands[1].entry.sampling_frequency_hz)
         age_us = max(age_us, Int64(0))
         @inbounds core.latency_hist[_latency_bin(age_us)] += 1
         age_us > core.max_record_age_us && (core.max_record_age_us = age_us)
     end
-    fold_closed_epochs!(core, now_reference)
-    commit_words!(core)
+    close_intervals!(core, now_reference)
+    commit_nco_commands!(core)
     handle_commands!(core)
     confirm_arms!(core)
     rearm_noise_references!(core)
     loop_heartbeat!(core.segment)
     elapsed = Int64(time_ns() - t0)
     elapsed > core.max_pass_ns && (core.max_pass_ns = elapsed)
-    core.last_nav_cycle != nav_cycle && elapsed > core.max_nav_cycle_ns && (core.max_nav_cycle_ns = elapsed)
+    core.last_nav_cycle_index != nav_cycle_index && elapsed > core.max_nav_cycle_ns && (core.max_nav_cycle_ns = elapsed)
     nothing
 end
 

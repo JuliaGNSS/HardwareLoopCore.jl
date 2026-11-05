@@ -39,7 +39,7 @@ _bank_by_name(banks::Tuple, name::FixedName, k::Int) =
     first(banks).name == name ? k : _bank_by_name(Base.tail(banks), name, k + 1)
 
 # The armed channel that drives the satellite `(group_key, prn)`, or 0.
-function _driver_channel(core::LoopCore, group_key::FixedName, prn::Int, except::Int)
+function _find_driver_channel(core::LoopCore, group_key::FixedName, prn::Int, except::Int)
     T = core.channels
     for ch = 1:core.num_channels
         ch == except && continue
@@ -63,40 +63,39 @@ end
 function _clear_channel!(core::LoopCore, ch::Int)
     T = core.channels
     T.confirmed[ch] = false
-    T.pending_word_sample[ch] = typemin(Int64)
-    T.word_dirty[ch] = false
+    T.pending_command_sample[ch] = typemin(Int64)
+    T.command_dirty[ch] = false
     T.last_record_end[ch] = typemin(Int64)
     T.last_record_samples[ch] = typemin(Int64)
     T.nominal_record_samples[ch] = typemin(Int64)
-    T.block_phase[ch] = NaN
+    T.code_period_phase[ch] = NaN
     T.primary_wraps[ch] = 0
     T.lost_record_samples[ch] = 0
     T.rearm_dead_samples[ch] = 0
     T.bit_clock_lost[ch] = false
     _discard_partial!(core, ch)
     T.partial_first[ch] = true
-    T.pending_blocks[ch] = 0
-    _forget_secondary_phase!(core, ch)
+    _forget_secondary_code_phase!(core, ch)
     T.phase_ref_sample[ch] = typemin(Int64)
-    T.anchor_sample[ch] = typemin(Int64)
-    T.anchor_code_phase[ch] = NaN
-    T.bit_phase_anchored[ch] = false
+    T.reported_code_phase_sample[ch] = typemin(Int64)
+    T.reported_code_phase[ch] = NaN
+    T.bit_edge_known[ch] = false
     T.carrier_phase[ch] = 0.0
     T.bit_index[ch] = 0
-    T.records_folded[ch] = 0
+    T.records_ingested[ch] = 0
     T.stale_records[ch] = 0
     nothing
 end
 
-# The signal-typed half of an arm: the fresh per-record state, the amplitude
-# scale, the overlay decision and the driver call.
+# The signal-typed half of an arm: the fresh post-correlation state, the
+# amplitude scale, the secondary code wipe-off decision and the driver call.
 function _arm_in_bank!(bank::ChannelBank, core::LoopCore, ch::Int, cmd::ArmCommand)
     T = core.channels
     signal = bank.signal
-    bank.states[ch] = reset_signal_state(bank.states[ch])
+    bank.states[ch] = reset_post_correlation!(bank.states[ch])
     bank.partial[ch] = zero(bank.template)
     # A satellite's records are scaled to the software correlator's, which still
-    # carry the signal's code amplitude (the loop's `normalize` divides it out);
+    # carry the signal's code amplitude (post-correlation processing divides it out);
     # the noise reference's density is per unit code amplitude, so its own
     # scale divides it out here.
     device_gain = cmd.replica_amplitude * cmd.code_amplitude
@@ -105,26 +104,28 @@ function _arm_in_bank!(bank::ChannelBank, core::LoopCore, ch::Int, cmd::ArmComma
     T.carrier_phase_offset[ch] = Float64(get_carrier_phase_offset(signal))
     T.secondary_wipe[ch] =
         get_secondary_code_length(signal) > 1 &&
-        cmd.secondary_code_mode == HardwareLoopProtocol.SECONDARY_PRIMARY_ONLY
-    T.estimator[ch] = init_estimator_state(
-        core.estimator,
+        cmd.secondary_code_mode == HardwareLoopProtocol.SECONDARY_CODE_LOOP_WIPES
+    T.loop_state[ch] = init_loop_state(
+        core.tracking_loop,
         signal,
         cmd.carrier_doppler_hz * Hz,
         cmd.code_doppler_hz * Hz,
     )
+    # The band's entry says where the channel's samples come from and at what rate.
+    entry = core.bands[T.band[ch]].entry
     spec = ArmSpec(
         signal,
         Int(cmd.prn),
         cmd.carrier_doppler_hz,
         cmd.code_doppler_hz,
         cmd.code_phase_chips,
-        cmd.valid_at_sample,
-        cmd.tap_sample_shifts,
-        Int(cmd.num_taps),
+        cmd.application_sample_index,
+        cmd.correlator_sample_offsets,
+        Int(cmd.num_correlators),
         Int(cmd.band),
-        Int(cmd.rf_input),
-        Int(cmd.device_index),
-        cmd.sampling_freq_hz,
+        Int(entry.rf_input),
+        Int(entry.device_index),
+        T.sampling_frequency[ch],
         cmd.replica_amplitude,
         cmd.code_amplitude,
     )
@@ -137,16 +138,16 @@ function _handle_arm!(core::LoopCore, tag::CommandTag, cmd::ArmCommand)
     1 <= ch <= core.num_channels || return _reject!(core, tag, HardwareLoopProtocol.REJECT_NO_SUCH_CHANNEL)
     bank = _bank_index_by_name(core, cmd.signal)
     bank == 0 && return _reject!(core, tag, HardwareLoopProtocol.REJECT_UNSUPPORTED_SIGNAL)
-    # Vector tracking drives a satellite with a signal its estimator ranges on:
-    # a data signal, or a pilot it pairs with its data component. Any signal may
-    # be a passenger; the estimator decodes the one it pairs with the driver.
+    # Vector tracking drives a satellite with a signal its tracking loop ranges
+    # on: a data signal, or a pilot it pairs with its data component. Any signal
+    # may be a passenger; the loop decodes the one it pairs with the driver.
     if _is_vector(core)
         cmd.signal_index == 1 && !core.vector_banks[bank] &&
             return _reject!(core, tag, HardwareLoopProtocol.REJECT_UNSUPPORTED_SIGNAL)
     end
     band = Int(cmd.band)
     1 <= band <= length(core.bands) || return _reject!(core, tag, HardwareLoopProtocol.REJECT_BAD_CONFIG)
-    (1 <= cmd.num_taps <= 5 && cmd.sampling_freq_hz > 0) ||
+    1 <= cmd.num_correlators <= 5 ||
         return _reject!(core, tag, HardwareLoopProtocol.REJECT_BAD_CONFIG)
     # A noise reference may only be re-pointed by a release; a satellite channel
     # may be re-armed in place (the same or another satellite).
@@ -164,8 +165,8 @@ function _handle_arm!(core::LoopCore, tag::CommandTag, cmd::ArmCommand)
     T.signal_index[ch] = Int(cmd.signal_index)
     T.group_key[ch] = cmd.group_key
     T.arm_sequence[ch] = tag.sequence
-    T.want_taps[ch] = cmd.want_taps != 0
-    T.sampling_freq[ch] = cmd.sampling_freq_hz
+    T.want_correlator_outputs[ch] = cmd.want_correlator_outputs != 0
+    T.sampling_frequency[ch] = core.bands[band].entry.sampling_frequency_hz
     T.carrier_doppler[ch] = cmd.carrier_doppler_hz
     T.code_doppler[ch] = cmd.code_doppler_hz
     T.code_phase[ch] = cmd.code_phase_chips
@@ -182,13 +183,13 @@ function _handle_arm!(core::LoopCore, tag::CommandTag, cmd::ArmCommand)
         b = core.bands[band]
         b.noise_channel = ch
         b.noise_prn = Int(cmd.prn)
-        b.noise_epochs_since_rearm = 0
+        b.noise_intervals_since_rearm = 0
         b.noise_power = 0.0
         b.noise_looks = 0
     elseif cmd.signal_index == 1
         _link_passengers!(core, cmd.group_key, Int(cmd.prn), ch)
     else
-        T.driver_channel[ch] = _driver_channel(core, cmd.group_key, Int(cmd.prn), ch)
+        T.driver_channel[ch] = _find_driver_channel(core, cmd.group_key, Int(cmd.prn), ch)
     end
     nothing
 end
@@ -210,16 +211,48 @@ function _handle_release!(core::LoopCore, tag::CommandTag)
     nothing
 end
 
+_is_set(cmd::ConfigureCommand, flag) = cmd.set_fields & flag != 0
+
+# Whether every field a configure command flags is in range. A flag or an event
+# this loop does not know is out of range too.
+function _is_valid_configure(cmd::ConfigureCommand)
+    in_range(flag, valid) = !_is_set(cmd, flag) || valid
+    cmd.set_fields & ~HardwareLoopProtocol.CONFIGURE_SET_ALL == 0 &&
+        in_range(HardwareLoopProtocol.CONFIGURE_SET_NCO_UPDATE_INTERVAL, cmd.nco_update_interval_samples >= 1) &&
+        in_range(HardwareLoopProtocol.CONFIGURE_SET_MAX_INTEGRATION_TIME,
+                 isfinite(cmd.max_integration_time_s) && cmd.max_integration_time_s > 0) &&
+        in_range(HardwareLoopProtocol.CONFIGURE_SET_NCO_COMMAND_DELAY, cmd.nco_command_delay_samples >= 0) &&
+        in_range(HardwareLoopProtocol.CONFIGURE_SET_NUM_CODE_PERIODS_TO_INTEGRATE,
+                 cmd.num_code_periods_to_integrate >= 0) &&
+        in_range(HardwareLoopProtocol.CONFIGURE_SET_NOISE_REARM_NCO_UPDATES, cmd.noise_rearm_nco_updates >= 1) &&
+        in_range(HardwareLoopProtocol.CONFIGURE_SET_MAX_BACKLOG_NCO_UPDATES, cmd.max_backlog_nco_updates >= 0) &&
+        in_range(HardwareLoopProtocol.CONFIGURE_SET_EVENT_FLAGS,
+                 cmd.event_flags & ~HardwareLoopProtocol.EVENTS_ALL == 0)
+end
+
+# Change exactly the fields the command flags, or, if one is out of range, none.
 function _handle_configure!(core::LoopCore, tag::CommandTag, cmd::ConfigureCommand)
-    cfg = core.config
-    cmd.epoch_length_samples > 0 && (cfg.epoch_length = cmd.epoch_length_samples)
-    cmd.commit_lead_samples > 0 && (cfg.commit_lead_samples = Int64(cmd.commit_lead_samples))
-    cmd.coherent_code_blocks >= 0 && cmd.epoch_length_samples > 0 && (cfg.coherent_code_blocks = Int(cmd.coherent_code_blocks))
-    cmd.max_integration_time_s > 0 && (cfg.max_integration_time = cmd.max_integration_time_s)
-    cmd.noise_rearm_epochs > 0 && (cfg.noise_rearm_epochs = Int(cmd.noise_rearm_epochs))
-    cmd.max_backlog_epochs > 0 && (cfg.max_backlog_epochs = Int(cmd.max_backlog_epochs))
-    cfg.publish_taps = (cmd.event_flags & HardwareLoopProtocol.EVENTS_TAPS) != 0
     sample = sample_count(core.driver, 1)
+    if !_is_valid_configure(cmd)
+        return _publish_status!(core, LOOP_STATUS_CHANNEL, sample, StatusEvent(
+            HardwareLoopProtocol.STATUS_COMMAND_REJECTED, HardwareLoopProtocol.REJECT_BAD_CONFIG, sample,
+            tag.sequence))
+    end
+    cfg = core.config
+    _is_set(cmd, HardwareLoopProtocol.CONFIGURE_SET_NCO_UPDATE_INTERVAL) &&
+        (cfg.nco_update_interval_samples = cmd.nco_update_interval_samples)
+    _is_set(cmd, HardwareLoopProtocol.CONFIGURE_SET_MAX_INTEGRATION_TIME) &&
+        (cfg.max_integration_time = cmd.max_integration_time_s)
+    _is_set(cmd, HardwareLoopProtocol.CONFIGURE_SET_NCO_COMMAND_DELAY) &&
+        (cfg.nco_command_delay_samples = Int64(cmd.nco_command_delay_samples))
+    _is_set(cmd, HardwareLoopProtocol.CONFIGURE_SET_NUM_CODE_PERIODS_TO_INTEGRATE) &&
+        (cfg.num_code_periods_to_integrate = Int(cmd.num_code_periods_to_integrate))
+    _is_set(cmd, HardwareLoopProtocol.CONFIGURE_SET_NOISE_REARM_NCO_UPDATES) &&
+        (cfg.noise_rearm_nco_updates = Int(cmd.noise_rearm_nco_updates))
+    _is_set(cmd, HardwareLoopProtocol.CONFIGURE_SET_MAX_BACKLOG_NCO_UPDATES) &&
+        (cfg.max_backlog_nco_updates = Int(cmd.max_backlog_nco_updates))
+    _is_set(cmd, HardwareLoopProtocol.CONFIGURE_SET_EVENT_FLAGS) &&
+        (cfg.publish_correlator_outputs = cmd.event_flags & HardwareLoopProtocol.EVENTS_CORRELATOR_OUTPUTS != 0)
     _publish_status!(core, LOOP_STATUS_CHANNEL, sample,
         StatusEvent(HardwareLoopProtocol.STATUS_CONFIGURED, HardwareLoopProtocol.REJECT_NONE, sample, tag.sequence))
     nothing
@@ -327,8 +360,8 @@ function confirm_arms!(core::LoopCore)
     nothing
 end
 
-# Re-arm each band's noise reference onto a fresh decoy every
-# `noise_rearm_epochs`: the next PRN of the family, a uniform code phase and a
+# Re-arm each band's noise reference onto a fresh noise probe every
+# `noise_rearm_nco_updates` NCO updates: the next PRN of the family, a uniform code phase and a
 # carrier offset within ±5 kHz, so a chance alignment with a live satellite is
 # one observation in the window rather than the window.
 function _rearm_in_bank!(bank::ChannelBank, core::LoopCore, ch::Int, band_index::Int)
@@ -342,33 +375,33 @@ function _rearm_in_bank!(bank::ChannelBank, core::LoopCore, ch::Int, band_index:
     now = sample_count(core.driver, band_index)
     spec = ArmSpec(
         signal, prn, carrier, 0.0, code_phase, now,
-        _template_tap_shifts(bank.template, T.sampling_freq[ch], signal), get_num_accumulators(bank.template),
-        band_index, Int(b.entry.rf_input), Int(b.entry.device_index), T.sampling_freq[ch], 1.0, Float64(get_code_amplitude(signal)),
+        _template_correlator_sample_offsets(bank.template, T.sampling_frequency[ch], signal), get_num_correlators(bank.template),
+        band_index, Int(b.entry.rf_input), Int(b.entry.device_index), T.sampling_frequency[ch], 1.0, Float64(get_code_amplitude(signal)),
     )
     outcome = arm!(core.driver, ch, spec)
     outcome.accepted || return nothing
     b.noise_prn = prn
     T.prn[ch] = prn
     T.confirmed[ch] = false
-    b.noise_epochs_since_rearm = 0
+    b.noise_intervals_since_rearm = 0
     b.noise_power = 0.0
     b.noise_looks = 0
     nothing
 end
 
-# The template correlator's quantised offsets at the channel's rate, as the
-# fixed tuple an arm carries.
-function _template_tap_shifts(template::AbstractCorrelator, sampling_freq_hz::Float64, signal)
-    shifts = get_correlator_sample_shifts(template, sampling_freq_hz, ustrip(Hz, uconvert(Hz, get_code_frequency(signal))))
-    ntuple(i -> i <= length(shifts) ? Int32(shifts[i]) : Int32(0), Val(5))
+# The template correlator bank's quantised sample offsets at the channel's
+# rate, as the fixed tuple an arm carries.
+function _template_correlator_sample_offsets(template::AbstractCorrelatorBank, sampling_frequency_hz::Float64, signal)
+    offsets = calc_correlator_sample_offsets(template, sampling_frequency_hz, _chip_rate_hz(signal))
+    ntuple(i -> i <= length(offsets) ? Int32(offsets[i]) : Int32(0), Val(5))
 end
 
 """
     rearm_noise_references!(core)
 
 Re-arm every band's noise reference that has served
-[`LoopConfig`](@ref)`.noise_rearm_epochs` epochs onto a fresh decoy: the next
-PRN of its signal, a pseudo-random code phase and a carrier offset within
+[`LoopConfig`](@ref)`.noise_rearm_nco_updates` NCO updates onto a fresh noise probe:
+the next PRN of its signal, a pseudo-random code phase and a carrier offset within
 ±5 kHz, so a chance alignment with a live satellite spoils one observation in
 the noise window rather than the window.
 """
@@ -376,7 +409,7 @@ function rearm_noise_references!(core::LoopCore)
     for (band_index, b) in enumerate(core.bands)
         ch = b.noise_channel
         ch == 0 && continue
-        b.noise_epochs_since_rearm >= core.config.noise_rearm_epochs || continue
+        b.noise_intervals_since_rearm >= core.config.noise_rearm_nco_updates || continue
         with_bank(_rearm_in_bank!, core, ch, core, ch, band_index)
     end
     nothing
