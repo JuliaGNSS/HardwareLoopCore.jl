@@ -111,14 +111,18 @@ end
 
 One RF band the loop serves: its entry in the band table, the scale from its
 sample counter onto the reference band's, and its noise reference — the
-hardware channel (0 for none), the noise probe PRN it replicates, the pooled `Σ|b|²`
-of this interval's looks and their count, and the intervals since the last re-arm.
+hardware channel (0 for none), the noise probe PRN it replicates, the replica and
+code amplitudes the receiver declared for it (a re-arm programs the same), the
+pooled `Σ|b|²` of this interval's looks and their count, and the intervals since the
+last re-arm.
 """
 mutable struct BandState
     const entry::BandEntry
     const timebase_scale::Float64   # reference samples per one of this band's samples
     noise_channel::Int
     noise_prn::Int
+    noise_replica_amplitude::Float64
+    noise_code_amplitude::Float64
     noise_power::Float64
     noise_looks::Int
     noise_samples_per_look::Int
@@ -139,6 +143,8 @@ function BandState(entry::BandEntry, reference_freq::Float64)
         reference_freq / entry.sampling_frequency_hz,
         0,
         0,
+        1.0,
+        1.0,
         0.0,
         0,
         0,
