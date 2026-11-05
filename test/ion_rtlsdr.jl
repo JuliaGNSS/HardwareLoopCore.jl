@@ -1,7 +1,7 @@
 # Vector tracking closed through the simulated device on a real recording: the
 # ION RTL-SDR capture (GPS L1 C/A, 60 s, 2.048 MS/s, 8-bit offset-binary I/Q at
 # zero IF), correlated by `SimulatedDevice`, the loops closed by the core's
-# `VectorPLLAndDLL`, and everything asserted from the segment's nav ring and
+# `VectorTrackingLoop`, and everything asserted from the segment's nav ring and
 # snapshot, as a receiver would read it. GNSSReceiver's
 # `test/ion_rtlsdr_integration.jl` runs the same recording through the software
 # receiver; its regression fix is the reference here.
@@ -12,7 +12,7 @@
 
 const ION_URL = "https://sdr.ion.org/RTL_SDR/RTLSDR_Bands-L1.uint8"
 const ION_FS = 2.048e6
-const ION_EPOCH = 2048                   # one C/A code period
+const ION_INTERVAL = 2048                   # one C/A code period
 # The healthy satellites GNSSReceiver's test locks on this recording.
 const ION_PRNS = [5, 7, 8, 13, 15, 18, 20, 21, 24, 28, 30]
 # GNSSReceiver's final scalar fix (ECEF, m): a pipeline baseline, not a surveyed point.
@@ -62,55 +62,53 @@ end
 
 # One run over the whole recording: acquire the healthy satellites in the first
 # 10 ms, arm them and a noise reference, then one service pass per code period.
-function run_ion_vector(file; record_delay_epochs)
+function run_ion_vector(file; record_delay_intervals)
     num_channels = length(ION_PRNS) + 1
-    dev = SimulatedDevice(GPSL1CA(); sampling_freq = ION_FS, num_channels,
-                          record_delay_samples = record_delay_epochs * ION_EPOCH,
-                          intermediate_frequency = ION_INTERMEDIATE_FREQUENCY)
+    dev = SimulatedDevice(GPSL1CA(); sampling_frequency_hz = ION_FS, num_channels,
+                          record_delay_samples = record_delay_intervals * ION_INTERVAL,
+                          intermediate_frequency_hz = ION_INTERMEDIATE_FREQUENCY)
     seg = create_segment(nothing, SegmentConfig(; channel_count = num_channels, bands = dev.bands))
     # The receiver's side: acquire around the IF the band table publishes.
-    initial = open(io -> read_ion_samples!(zeros(ComplexF64, 10ION_EPOCH), Vector{UInt8}(undef, 20ION_EPOCH), io), file)
+    initial = open(io -> read_ion_samples!(zeros(ComplexF64, 10ION_INTERVAL), Vector{UInt8}(undef, 20ION_INTERVAL), io), file)
     acquired = acquire(GPSL1CA(), initial, ION_FS * Hz, ION_PRNS;
-                       interm_freq = band_table(seg)[1].intermediate_frequency_hz * Hz,
-                       num_coherently_integrated_code_periods = 2, num_noncoherent_accumulations = 5,
+                       intermediate_frequency = band_table(seg)[1].intermediate_frequency_hz * Hz,
+                       num_coherently_integrated_code_periods = 2, num_noncoherent_integrations = 5,
                        subsample_interpolation = true)
-    estimator = VectorPLLAndDLL(GPSL1CA(); inner = NCOReferencedPLLAndDLL(), approximate_year = 2017)
-    core = LoopCore(dev, (GPSL1CA(),), seg; estimator)
-    shifts = HardwareLoopCore._template_tap_shifts(core.banks[1].template, ION_FS, GPSL1CA())
+    tracking_loop = VectorTrackingLoop(GPSL1CA(); scalar_loop = DelayCompensatedTrackingLoop(), approximate_year = 2017)
+    core = LoopCore(dev, (GPSL1CA(),), seg; tracking_loop)
+    shifts = HardwareLoopCore._template_correlator_sample_offsets(core.banks[1].template, ION_FS, GPSL1CA())
     commands = command_ring(seg)
     for (ch, acq) in enumerate(acquired)
         doppler = ustrip(Hz, acq.carrier_doppler)
         publish!(commands, CommandTag(HLP.COMMAND_ARM, ch, ch), ArmCommand(;
             signal = :GPSL1CA, prn = acq.prn, carrier_doppler_hz = doppler, code_doppler_hz = doppler / 1540,
-            code_phase_chips = acq.code_phase, valid_at_sample = 0, tap_sample_shifts = shifts, num_taps = 3,
-            sampling_freq_hz = ION_FS))
+            code_phase_chips = acq.code_phase, application_sample_index = 0, correlator_sample_offsets = shifts, num_correlators = 3))
     end
     publish!(commands, CommandTag(HLP.COMMAND_ARM, num_channels, num_channels), ArmCommand(;
         signal = :GPSL1CA, prn = 1, signal_index = 0, carrier_doppler_hz = 3000.0, code_doppler_hz = 0.0,
-        code_phase_chips = 100.0, valid_at_sample = 0, tap_sample_shifts = shifts, num_taps = 3,
-        sampling_freq_hz = ION_FS))
+        code_phase_chips = 100.0, application_sample_index = 0, correlator_sample_offsets = shifts, num_correlators = 3))
     service_pass!(core; wait_ms = 0)
 
     nav = nav_ring(seg)
     solutions = Tuple{EventTag,NavSolutionEvent}[]
     satellites = Tuple{EventTag,NavSatelliteEvent}[]
     allocated_warm = 0
-    filter_cycles = 0
-    buf = zeros(ComplexF64, ION_EPOCH)
-    raw = Vector{UInt8}(undef, 2ION_EPOCH)
-    num_passes = filesize(file) ÷ (2ION_EPOCH)
+    filter_updates = 0
+    buf = zeros(ComplexF64, ION_INTERVAL)
+    raw = Vector{UInt8}(undef, 2ION_INTERVAL)
+    num_passes = filesize(file) ÷ (2ION_INTERVAL)
     open(file) do io
         for _ = 1:num_passes
             read_ion_samples!(buf, raw, io)
             correlate_chunk!(dev, buf)
             allocated = @allocated service_pass!(core; wait_ms = 0)
-            # The device's log of every word it took, which would grow.
-            empty!(dev.words)
-            # Warm once the filter has run a cycle past the one that seeded it
-            # (the engine sizes its member report on those two): from then on
-            # every pass — the cycles, the UKF and the nav publish included —
-            # allocates nothing.
-            filter_cycles >= 2 && (allocated_warm += allocated)
+            # The device's log of every NCO command it took, which would grow.
+            empty!(dev.nco_commands)
+            # Warm once the filter has run an update past the one that seeded it
+            # (the navigation processor sizes its member report on those two):
+            # from then on every pass — the updates, the UKF and the nav publish
+            # included — allocates nothing.
+            filter_updates >= 2 && (allocated_warm += allocated)
             for ch = 1:num_channels
                 drain_ring!(event_ring(seg, ch))
             end
@@ -120,7 +118,7 @@ function run_ion_vector(file; record_delay_epochs)
                 if view.tag.kind == HLP.EVENT_NAV_SOLUTION
                     solution = payload(NavSolutionEvent, nav, view)
                     push!(solutions, (view.tag, solution))
-                    solution.flags & HLP.NAV_RUNNING != 0 && (filter_cycles += 1)
+                    solution.flags & HLP.NAV_VECTOR_TRACKING_ACTIVE != 0 && (filter_updates += 1)
                 else
                     push!(satellites, (view.tag, payload(NavSatelliteEvent, nav, view)))
                 end
@@ -131,22 +129,22 @@ function run_ion_vector(file; record_delay_epochs)
     (; core, seg, solutions, satellites, allocated_warm)
 end
 
-@testset "Vector tracking on the ION RTL-SDR recording ($delay-epoch record delay)" for delay in (0, 2)
-    r = run_ion_vector(ion_recording(); record_delay_epochs = delay)
+@testset "Vector tracking on the ION RTL-SDR recording ($delay-interval record delay)" for delay in (0, 2)
+    r = run_ion_vector(ion_recording(); record_delay_intervals = delay)
     @test !isempty(r.solutions)
-    @test r.core.words_late == 0
-    @test r.core.words_rejected == 0
+    @test r.core.nco_commands_late == 0
+    @test r.core.nco_commands_rejected == 0
     @test consumer_lost(nav_ring(r.seg)) == 0
-    # The filter seeds from the engine's first scalar fix (the navigation data
-    # takes some 30 s to decode) and runs to the end.
-    first_seeded = findfirst(((_, s),) -> s.flags & HLP.NAV_SEEDED != 0, r.solutions)
+    # The filter seeds from the navigation processor's first scalar fix (the
+    # navigation data takes some 30 s to decode) and runs to the end.
+    first_seeded = findfirst(((_, s),) -> s.flags & HLP.NAV_SOLUTION_FROM_NAV_FILTER != 0, r.solutions)
     @test !isnothing(first_seeded)
-    @test all(s.flags & HLP.NAV_RUNNING != 0 for (_, s) in r.solutions[first_seeded:end])
+    @test all(s.flags & HLP.NAV_VECTOR_TRACKING_ACTIVE != 0 for (_, s) in r.solutions[first_seeded:end])
     @test r.allocated_warm == 0
     tag, solution = r.solutions[end]
     @test solution.flags & (HLP.NAV_VALID | HLP.NAV_TIME_VALID) == HLP.NAV_VALID | HLP.NAV_TIME_VALID
-    @test solution.num_members >= 4
-    @test solution.num_sats >= 4
+    @test solution.num_vector_tracking_members >= 4
+    @test solution.num_observations >= 4
     # Within a few metres of the baseline. Its height is the least certain part: no
     # ionospheric coefficients are decoded from 60 s, so nothing corrects for the
     # ionosphere (the scalar fixes sit some 6 m high as well).
@@ -155,19 +153,19 @@ end
     @test norm(sum(e -> e[1:2], enu) / length(enu)) < 5.0
     # Code and carrier agree once the front end's offset is the IF: no common-mode
     # code residual is left for the single clock drift to fight (-30 m without it).
-    last_cycle_residuals = [s.residual_m for (_, s) in r.satellites if s.cycle == solution.cycle]
-    @test abs(sum(last_cycle_residuals) / length(last_cycle_residuals)) < 5.0
+    last_update_residuals = [s.residual_m for (_, s) in r.satellites if s.update_index == solution.update_index]
+    @test abs(sum(last_update_residuals) / length(last_update_residuals)) < 5.0
     @test norm(collect(solution.velocity_ecef_mps)) < 5.0           # a static receiver
     @test abs(solution.time_tai_s + solution.time_tai_frac - ION_TIME_TAI_S) < 1.0
     @test all(isfinite, solution.dop) && solution.position_std_m < 10.0
     @test read_nav_snapshot(r.seg) == (tag, solution)
-    # The last cycle reports every healthy satellite tracked, in lock and in the
+    # The last update reports every healthy satellite tracked, in lock and in the
     # solution, each on the channel it was armed on.
-    last_cycle = [(t, s) for (t, s) in r.satellites if s.cycle == solution.cycle]
-    @test sort([Int(t.prn) for (t, _) in last_cycle]) == ION_PRNS
-    for (t, s) in last_cycle
-        @test s.flags & (HLP.NAV_SAT_TRACKED | HLP.NAV_SAT_IN_LOCK | HLP.NAV_SAT_IN_SOLUTION) ==
-              HLP.NAV_SAT_TRACKED | HLP.NAV_SAT_IN_LOCK | HLP.NAV_SAT_IN_SOLUTION
+    last_update = [(t, s) for (t, s) in r.satellites if s.update_index == solution.update_index]
+    @test sort([Int(t.prn) for (t, _) in last_update]) == ION_PRNS
+    for (t, s) in last_update
+        @test s.flags & (HLP.NAV_SAT_MEASUREMENT_READY | HLP.NAV_SAT_IN_SOLUTION) ==
+              HLP.NAV_SAT_MEASUREMENT_READY | HLP.NAV_SAT_IN_SOLUTION
         @test ION_PRNS[s.channel] == t.prn
         @test isfinite(s.residual_m) && s.cn0_dbhz > 35
     end

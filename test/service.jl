@@ -20,8 +20,8 @@ end
     # Records read the moment they end: no age.
     @test f.core.latency_hist[1] == 2
     # A record read 2 ms (8000 samples) after it ended.
-    push!(f.dev.queue, epl_record(1, 7, 3CORE_EPOCH, 1.0))
-    f.dev.sample_count = 5CORE_EPOCH
+    push!(f.dev.queue, epl_record(1, 7, 3CORE_INTERVAL, 1.0))
+    f.dev.sample_count = 5CORE_INTERVAL
     service_pass!(f.core; wait_ms = 0)
     @test f.core.max_record_age_us == 2000
     @test f.core.latency_hist[findfirst(>(2000), LATENCY_EDGES_US)] == 1

@@ -13,6 +13,7 @@ makedocs(
         "Home" => "index.md",
         "Usage" => "usage.md",
         "Writing a driver" => "drivers.md",
+        "Glossary" => "glossary.md",
         "API Reference" => "api.md",
     ],
     # Every exported symbol must appear in the manual, and every `@ref` must

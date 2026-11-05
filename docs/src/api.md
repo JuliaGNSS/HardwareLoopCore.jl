@@ -7,7 +7,7 @@ AbstractLoopDriver
 DriverCapabilities
 driver_capabilities
 read_records!
-write_word!
+write_nco_command!
 arm!
 release!
 assignment_start
@@ -29,8 +29,8 @@ arm_rejected
 
 ```@docs
 DeviceRecord
-MAX_RECORD_TAPS
-pack_taps
+MAX_RECORD_CORRELATOR_OUTPUTS
+pack_correlator_outputs
 strobe_record
 is_strobe
 ```
@@ -42,8 +42,8 @@ LoopCore
 service_pass!
 run!
 take_records!
-fold_closed_epochs!
-commit_words!
+close_nco_update_spans!
+commit_nco_commands!
 handle_commands!
 confirm_arms!
 rearm_noise_references!

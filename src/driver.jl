@@ -13,10 +13,11 @@ Supertype of a hardware correlator's driver as the loop core sees it. Required:
   - [`read_records!`](@ref)`(driver, records)` — append every record the device
     has produced since the last call to `records` (a `Vector{DeviceRecord}`
     sized once), returning how many. Never blocks.
-  - [`write_word!`](@ref)`(driver, channel, carrier_hz, code_hz)` — commit a
-    carrier and code NCO word on `channel`, effective on the next sample. The
-    carrier is a Doppler: the channel's carrier NCO runs at its band's
-    intermediate frequency plus it.
+  - [`write_nco_command!`](@ref)`(driver, channel, carrier_doppler_hz, code_doppler_hz)` —
+    commit a carrier and code NCO command on `channel`, effective on the next
+    sample. Both are Dopplers: the channel's carrier NCO runs at its band's
+    intermediate frequency plus the carrier Doppler, its code NCO at the chip
+    rate plus the code Doppler.
   - [`arm!`](@ref)`(driver, channel, spec::ArmSpec)` — load a replica and start
     correlating; returns [`ArmOutcome`](@ref).
   - [`release!`](@ref)`(driver, channel)`.
@@ -35,39 +36,42 @@ cleared on read (default 0).
 """
 abstract type AbstractLoopDriver end
 
-"How many tap × antenna values one record can carry."
-const MAX_RECORD_TAPS = HardwareLoopProtocol.MAX_TAP_VALUES
+"How many correlator outputs (correlators × antennas) one record can carry."
+const MAX_RECORD_CORRELATOR_OUTPUTS = HardwareLoopProtocol.MAX_CORRELATOR_OUTPUTS
 
 """
-    DeviceRecord(channel, prn, sample_index, integrated_samples, taps, num_taps;
-                 band = 1, num_ants = 1, code_phase = NaN)
+    DeviceRecord(channel, prn, sample_index, num_integrated_samples, correlator_outputs, num_correlators;
+                 band = 1, num_ants = 1, code_phase_chips = NaN)
 
-One correlator dump, or one epoch strobe, as the driver hands it to the core.
+One correlator dump, or one timebase strobe, as the driver hands it to the core.
 `isbits`, so the ingest buffer is one flat vector.
 
-  - `channel` — hardware channel (1-based), or `0` for an epoch strobe.
+  - `channel` — hardware channel (1-based), or `0` for a timebase strobe.
   - `band` — the band the record's `sample_index` is counted on (1-based index
     into the core's band table).
   - `prn` — the PRN the channel was correlating, for stale-record detection.
   - `sample_index` — the device counter at the end of the integration.
-  - `integrated_samples` — samples integrated.
-  - `code_phase` — the replica's code phase in chips at `sample_index`, `NaN`
-    when the device does not report it.
-  - `num_taps`, `num_ants` — how many of `taps` are meaningful: latest tap first,
-    antenna-major (`taps[(ant - 1) * num_taps + tap]`), raw accumulator sums.
+  - `num_integrated_samples` — samples integrated.
+  - `code_phase_chips` — the replica's code phase at `sample_index`, `NaN` when
+    the device does not report it.
+  - `num_correlators`, `num_ants` — how many of `correlator_outputs` are
+    meaningful: from the latest replica to the earliest, antenna-major
+    (`correlator_outputs[(antenna - 1) * num_correlators + correlator]`), the sums
+    the device integrated, on the software correlator's scale (see the driver
+    guide's Amplitudes section).
 """
 struct DeviceRecord
     channel::Int32
     band::UInt8
-    num_taps::UInt8
+    num_correlators::UInt8
     num_ants::UInt8
     flags::UInt8
     prn::Int32
     sample_index::Int64
-    integrated_samples::Int32
+    num_integrated_samples::Int32
     pad::Int32
-    code_phase::Float64
-    taps::NTuple{MAX_RECORD_TAPS,ComplexF64}
+    code_phase_chips::Float64
+    correlator_outputs::NTuple{MAX_RECORD_CORRELATOR_OUTPUTS,ComplexF64}
 end
 
 const RECORD_STROBE_CHANNEL = Int32(0)
@@ -76,41 +80,41 @@ function DeviceRecord(
     channel::Integer,
     prn::Integer,
     sample_index::Integer,
-    integrated_samples::Integer,
-    taps::NTuple{MAX_RECORD_TAPS,ComplexF64},
-    num_taps::Integer;
+    num_integrated_samples::Integer,
+    correlator_outputs::NTuple{MAX_RECORD_CORRELATOR_OUTPUTS,ComplexF64},
+    num_correlators::Integer;
     band::Integer = 1,
     num_ants::Integer = 1,
-    code_phase::Real = NaN,
+    code_phase_chips::Real = NaN,
 )
     DeviceRecord(
         Int32(channel),
         UInt8(band),
-        UInt8(num_taps),
+        UInt8(num_correlators),
         UInt8(num_ants),
         0x00,
         Int32(prn),
         Int64(sample_index),
-        Int32(integrated_samples),
+        Int32(num_integrated_samples),
         Int32(0),
-        Float64(code_phase),
-        taps,
+        Float64(code_phase_chips),
+        correlator_outputs,
     )
 end
 
 """
     strobe_record(sample_index; band = 1) -> DeviceRecord
 
-An epoch strobe: a timebase marker at `sample_index` on `band`'s counter. A
-driver hands one to the core wherever the device strobes its epoch clock; the
-core uses it to advance its epoch clock and folds nothing from it.
+A timebase strobe: a marker at `sample_index` on `band`'s counter. A driver
+hands one to the core wherever the device strobes; the core uses it to advance
+its timebase and integrates nothing from it.
 """
 strobe_record(sample_index::Integer; band::Integer = 1) = DeviceRecord(
     RECORD_STROBE_CHANNEL,
     0,
     sample_index,
     0,
-    ntuple(_ -> complex(0.0, 0.0), MAX_RECORD_TAPS),
+    ntuple(_ -> complex(0.0, 0.0), MAX_RECORD_CORRELATOR_OUTPUTS),
     0;
     band,
 )
@@ -118,22 +122,23 @@ strobe_record(sample_index::Integer; band::Integer = 1) = DeviceRecord(
 """
     is_strobe(record::DeviceRecord) -> Bool
 
-Whether `record` is an epoch strobe ([`strobe_record`](@ref)) rather than a
+Whether `record` is a timebase strobe ([`strobe_record`](@ref)) rather than a
 correlator dump.
 """
 is_strobe(record::DeviceRecord) = record.channel == RECORD_STROBE_CHANNEL
 
 """
-    pack_taps(values::AbstractVector{<:Complex}) -> NTuple{MAX_RECORD_TAPS,ComplexF64}
+    pack_correlator_outputs(values::AbstractVector{<:Complex}) -> NTuple{MAX_RECORD_CORRELATOR_OUTPUTS,ComplexF64}
 
-Pack tap values into the fixed tuple a [`DeviceRecord`](@ref) carries, in the
-order given (latest tap first, antenna-major), zero beyond `length(values)`.
-Throws an `ArgumentError` for more than [`MAX_RECORD_TAPS`](@ref) values.
+Pack correlator outputs into the fixed tuple a [`DeviceRecord`](@ref) carries,
+in the order given (from the latest replica to the earliest, antenna-major), zero
+beyond `length(values)`.
+Throws an `ArgumentError` for more than [`MAX_RECORD_CORRELATOR_OUTPUTS`](@ref) values.
 """
-function pack_taps(values::AbstractVector{<:Complex})
+function pack_correlator_outputs(values::AbstractVector{<:Complex})
     n = length(values)
-    n <= MAX_RECORD_TAPS || throw(ArgumentError("more than $MAX_RECORD_TAPS tap values"))
-    ntuple(i -> i <= n ? ComplexF64(values[i]) : complex(0.0, 0.0), MAX_RECORD_TAPS)
+    n <= MAX_RECORD_CORRELATOR_OUTPUTS || throw(ArgumentError("more than $MAX_RECORD_CORRELATOR_OUTPUTS correlator outputs"))
+    ntuple(i -> i <= n ? ComplexF64(values[i]) : complex(0.0, 0.0), MAX_RECORD_CORRELATOR_OUTPUTS)
 end
 
 """
@@ -141,9 +146,9 @@ end
 
 What the core asks a driver to program when arming a channel: the signal (as
 the concrete GNSSSignals object), the PRN, the handover Dopplers and code
-phase valid at `valid_at_sample` (on the channel's band counter), the quantised
-tap offsets, the band and RF routing, and the amplitude declarations the record
-scaling depends on.
+phase valid at `application_sample_index` (on the channel's band counter), the quantised
+correlator sample offsets, and the band with the RF input, device and sampling frequency
+its band table entry gives.
 """
 struct ArmSpec{S<:AbstractGNSSSignal}
     signal::S
@@ -151,15 +156,13 @@ struct ArmSpec{S<:AbstractGNSSSignal}
     carrier_doppler_hz::Float64
     code_doppler_hz::Float64
     code_phase_chips::Float64
-    valid_at_sample::Int64
-    tap_sample_shifts::NTuple{5,Int32}
-    num_taps::Int
+    application_sample_index::Int64
+    correlator_sample_offsets::NTuple{5,Int32}
+    num_correlators::Int
     band::Int
     rf_input::Int
     device_index::Int
-    sampling_freq_hz::Float64
-    replica_amplitude::Float64
-    code_amplitude::Float64
+    sampling_frequency_hz::Float64
 end
 
 "The outcome of `arm!`: accepted (confirmation follows through `assignment_start`) or rejected with a protocol reason code."
@@ -189,8 +192,8 @@ arm_rejected(reason) = ArmOutcome(false, UInt32(reason))
 """
     DriverCapabilities
 
-The device's fixed limits as the core needs them: channels, the widest tap
-layout its records carry, antennas, and the band table.
+The device's fixed limits as the core needs them: channels, the most
+correlators its records carry, antennas, and the band table.
 
 Each band's `BandEntry` carries its `intermediate_frequency_hz`: where a signal
 at zero Doppler sits in the band's samples, including any fixed offset the
@@ -201,7 +204,7 @@ commands; the core, the protocol and the receiver deal in Dopplers only.
 """
 struct DriverCapabilities
     num_channels::Int
-    max_taps::Int
+    max_correlators::Int
     num_ants::Int
     bands::Vector{BandEntry}
 end
@@ -210,7 +213,7 @@ end
     read_records!(driver, records::Vector{DeviceRecord}) -> Int
 
 Append every record the device has produced since the last call — correlator
-dumps and epoch strobes, in the order the device produced them — to `records`
+dumps and timebase strobes, in the order the device produced them — to `records`
 and return how many were appended. Must never block, and should not allocate:
 the core passes the same vector, emptied and with its capacity reserved, on
 every pass. Required for every [`AbstractLoopDriver`](@ref).
@@ -218,15 +221,17 @@ every pass. Required for every [`AbstractLoopDriver`](@ref).
 function read_records! end
 
 """
-    write_word!(driver, channel, carrier_hz::Float64, code_hz::Float64) -> Bool
+    write_nco_command!(driver, channel, carrier_doppler_hz::Float64, code_doppler_hz::Float64) -> Bool
 
-Commit a carrier and a code NCO word (the Dopplers, in Hz) on `channel`,
-effective on the device's next sample. The carrier NCO runs at the band's
-intermediate frequency ([`DriverCapabilities`](@ref)) plus `carrier_hz`. Return `false` if the device refused the
-word (e.g. the channel is not running), which the core counts as rejected.
+Commit a carrier and a code NCO command (the Dopplers, in Hz) on `channel`,
+effective on the device's next sample; the driver encodes it into its NCOs'
+words. The carrier NCO runs at the band's intermediate frequency
+([`DriverCapabilities`](@ref)) plus `carrier_doppler_hz`. Return `false` if the
+device refused the command (e.g. the channel is not running), which the core
+counts as rejected and cancels from the channel's NCO timeline.
 Required for every [`AbstractLoopDriver`](@ref).
 """
-function write_word! end
+function write_nco_command! end
 
 """
     arm!(driver, channel, spec::ArmSpec) -> ArmOutcome
@@ -266,7 +271,7 @@ function assignment_start end
 
 The device's free-running sample counter for `band` (an index into
 [`DriverCapabilities`](@ref)`.bands`), read now. Band 1 is the reference band:
-its counter is the receiver timebase the epoch clock runs on. Required for
+its counter is the receiver timebase the core runs on. Required for
 every [`AbstractLoopDriver`](@ref).
 """
 function sample_count end

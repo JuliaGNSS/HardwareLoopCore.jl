@@ -18,15 +18,15 @@ const HLP = HardwareLoopProtocol
 
 signal = GPSL1CA()
 fs = 4e6
-dev = SimulatedDevice(signal; sampling_freq = fs, num_channels = 2)
+dev = SimulatedDevice(signal; sampling_frequency_hz = fs, num_channels = 2)
 # The segment publishes the driver's band table (rates and intermediate frequencies).
 seg = create_segment(nothing, SegmentConfig(; channel_count = 2, bands = driver_capabilities(dev).bands))
 core = LoopCore(dev, (signal,), seg)
-core.config.epoch_length
+core.config.nco_update_interval_samples
 ```
 
-The epoch defaults to one primary code period of the first signal, here 1 ms
-or 4000 samples. A [`LoopConfig`](@ref) passed as `config` overrides it and the
+The NCO update interval defaults to one primary code period of the
+first signal, here 1 ms or 4000 samples. A [`LoopConfig`](@ref) passed as `config` overrides it and the
 other loop-wide settings; the receiver can change them later with a
 `ConfigureCommand`.
 
@@ -34,7 +34,7 @@ other loop-wide settings; the receiver can change them later with a
 
 The receiver hands over a satellite with an `ArmCommand` on the command ring:
 the signal, the PRN, the Dopplers and the code phase it measured at
-`valid_at_sample`, and the tap offsets in samples. The core programs the
+`application_sample_index`, and the correlators' sample offsets. The core programs the
 device, and answers once the device has confirmed. Here channel 1 tracks the
 satellite and channel 2 becomes the band's noise reference (`signal_index = 0`),
 which the C/N₀ estimate is measured against.
@@ -48,10 +48,9 @@ satellite = ArmCommand(;
     carrier_doppler_hz = doppler - 10,   # a handover is never exact
     code_doppler_hz = doppler / 1540,
     code_phase_chips = code_phase,
-    valid_at_sample = 0,
-    tap_sample_shifts = (-2, 0, 2),      # early, prompt, late
-    num_taps = 3,
-    sampling_freq_hz = fs,
+    application_sample_index = 0,
+    correlator_sample_offsets = (-2, 0, 2),      # early, prompt, late
+    num_correlators = 3,
 )
 noise = ArmCommand(;
     signal = :GPSL1CA,
@@ -60,10 +59,9 @@ noise = ArmCommand(;
     carrier_doppler_hz = 3000.0,
     code_doppler_hz = 0.0,
     code_phase_chips = 0.0,
-    valid_at_sample = 0,
-    tap_sample_shifts = (-2, 0, 2),
-    num_taps = 3,
-    sampling_freq_hz = fs,
+    application_sample_index = 0,
+    correlator_sample_offsets = (-2, 0, 2),
+    num_correlators = 3,
 )
 try_publish!(commands, CommandTag(HLP.COMMAND_ARM, 1, 1), satellite)
 try_publish!(commands, CommandTag(HLP.COMMAND_ARM, 2, 2), noise)
@@ -73,9 +71,9 @@ try_publish!(commands, CommandTag(HLP.COMMAND_ARM, 2, 2), noise)
 
 In a loop process, [`run!`](@ref) calls [`service_pass!`](@ref) until a
 shutdown command arrives, and the driver's [`wait_records`](@ref) paces it.
-Here the samples are synthesised one epoch at a time — the satellite's code
+Here the samples are synthesised one NCO update span at a time — the satellite's code
 with a navigation bit that flips every 20 ms, in noise — the device correlates
-them with [`correlate_chunk!`](@ref), and one pass folds what it produced:
+them with [`correlate_chunk!`](@ref), and one pass closes the span it produced:
 
 ```@example usage
 rng = Xoshiro(1)
@@ -94,18 +92,19 @@ for c in 0:1499
     correlate_chunk!(dev, synthesize!(buf, 4000c))
     service_pass!(core; wait_ms = 0)
 end
-(dev.channels[1].carrier_doppler, core.words_committed)
+(dev.channels[1].carrier_doppler, core.nco_commands_committed)
 ```
 
 The loop has pulled the device's carrier NCO from the handover's 1190 Hz to
 the true 1200 Hz. Once bit synchronisation is found, the loop steps once per
-primary code period as before, and the bit buffer integrates the whole bit.
+primary code period as before, and the bit synchronizer integrates the whole
+bit.
 
 ## Reading the events
 
-Each channel has an event ring: status events answer commands, a record event
-follows every loop step, a bit event every navigation bit, and an epoch state
-closes every epoch. The receiver drains it:
+Each channel has an event ring: status events answer commands, an integration
+event follows every integration, a bit event every navigation bit, and a loop state
+closes every NCO update span. The receiver drains it:
 
 ```@example usage
 function drain!(events)
@@ -116,32 +115,32 @@ function drain!(events)
         status === :empty && break
         if view.tag.kind == HLP.EVENT_STATUS
             ev = payload(StatusEvent, events, view)
-            ev.code == HLP.STATUS_ARMED && (armed_at = ev.sample)
+            ev.code == HLP.STATUS_ARMED && (armed_at = ev.sample_index)
         end
         counts[view.tag.kind] = get(counts, view.tag.kind, 0) + 1
         commit!(events, view)
     end
-    (armed_at, records = counts[HLP.EVENT_RECORD], bits = get(counts, HLP.EVENT_BIT, 0),
-     epoch_states = counts[HLP.EVENT_EPOCH_STATE])
+    (armed_at, integrations = counts[HLP.EVENT_INTEGRATION], bits = get(counts, HLP.EVENT_BIT, 0),
+     loop_states = counts[HLP.EVENT_LOOP_STATE])
 end
 
 drain!(event_ring(seg, 1))
 ```
 
-The newest epoch state is also kept in the channel's snapshot slot, for a
+The newest loop state is also kept in the channel's snapshot slot, for a
 receiver that only wants the current state:
 
 ```@example usage
 tag, state = read_snapshot(snapshot_slot(seg, 1))
 (doppler = state.carrier_doppler_hz,
- cn0_dBHz = 10log10(state.cn0_linear_hz),
- synchronised = state.flags & HLP.STATE_SYNC_FOUND != 0)
+ cn0_dbhz = state.cn0_dbhz,
+ synchronised = state.flags & HLP.STATE_BIT_OR_SECONDARY_CODE_SYNCED != 0)
 ```
 
 ## Vector tracking
 
-Built with TrackingLoops' `VectorPLLAndDLL`, the core closes every satellite's
-loops through one shared navigation engine and publishes each navigation cycle
+Built with TrackingLoops' `VectorTrackingLoop`, the core closes every satellite's
+loops through one shared navigation processor and publishes each navigation update
 on the segment's loop-wide nav ring: a `NavSatelliteEvent` per armed driver
 channel, then the `NavSolutionEvent`, which is also written into the nav
 snapshot. The segment's `navigation_mode` is `NAV_VECTOR`, so the receiver
@@ -149,32 +148,34 @@ takes the position from the loop instead of decoding the bits itself; with the
 scalar loops it is `NAV_NONE` and the nav ring stays empty.
 
 ```julia
-estimator = VectorPLLAndDLL(GPSL1CA(); inner = NCOReferencedPLLAndDLL())
-core = LoopCore(dev, (GPSL1CA(),), seg; estimator)
+tracking_loop = VectorTrackingLoop(GPSL1CA(); scalar_loop = DelayCompensatedTrackingLoop())
+core = LoopCore(dev, (GPSL1CA(),), seg; tracking_loop)
 # … service passes …
 tag, solution = read_nav_snapshot(seg)
-solution.position_ecef_m, solution.flags & HLP.NAV_RUNNING != 0
+solution.position_ecef_m, solution.flags & HLP.NAV_VECTOR_TRACKING_ACTIVE != 0
 ```
 
-The estimator must list every data signal of the core, plain or as the data
-component of a `pilot => data` pair. A pilot drives a satellite only when the
-estimator pairs it, e.g. `VectorPLLAndDLL(GPSL1C_P() => GPSL1CA(); …)`, and
-the data component's channel is armed as its passenger. Its satellites are
-stepped from the records alone; the core gives each record the satellite's PRN
-and the replica's code phase, and keeps stepping them through a stale backlog
-so the engine never starves.
+The tracking loop must list every data signal of the core, plain or as the
+data component of a `pilot => data` pair. A pilot drives a satellite only when
+the tracking loop pairs it, e.g. `VectorTrackingLoop(GPSL1C_P() => GPSL1CA();
+…)`, and the data component's channel is armed as its passenger. Its
+satellites are stepped from the integrations alone; the core gives each
+integration the satellite's PRN and the replica's code phase, and keeps
+stepping them through a stale backlog so the navigation processor never
+starves.
 
 ## Diagnostics
 
 The core counts what went wrong instead of throwing on the service path. Among
-the counters on a [`LoopCore`](@ref): `stale_dumps` (records for a channel that
+the counters on a [`LoopCore`](@ref): `stale_records` (records for a channel that
 was free, re-armed or not yet confirmed), `lost_record_gaps` (records that
-never arrived), `words_late` and `words_rejected`, `dropped_records` (ingest
-buffer full), and `latency_hist`, a histogram of the record-to-word latency over
+never arrived), `nco_commands_late` and `nco_commands_rejected`,
+`dropped_records` (ingest buffer full), and `latency_hist`, a histogram of the
+record-to-command latency over
 [`LATENCY_EDGES_US`](@ref). In vector mode, `nav_events_published` counts the
-nav ring's events and `max_nav_cycle_ns` is the longest pass that ran a
-navigation cycle.
+nav ring's events and `max_nav_update_ns` is the longest pass that ran a
+navigation update.
 
 ```@example usage
-(core.stale_dumps, core.lost_record_gaps, core.words_late, core.max_record_age_us)
+(core.stale_records, core.lost_record_gaps, core.nco_commands_late, core.max_record_age_us)
 ```
