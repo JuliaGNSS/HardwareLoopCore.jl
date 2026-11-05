@@ -83,7 +83,7 @@ function _emit_integration!(core::LoopCore, bank::ChannelBank, ch::Int)
         correlator_bank, Int(samples), Int(sample_end), _integration_code_phase(core, signal, ch, sample_end))
     fs = T.sampling_frequency[ch] * Hz
     offset = _band_sample_offset(core, T.band[ch])
-    noise_density = _noise_density(bank.template, band.noise_density / Hz)
+    noise_density, noise_density_ready = TrackingLoops.noise_density_and_ready(band.noise_estimator)
     state, integration = process_correlator_bank_output!(
         bank.states[ch],
         signal,
@@ -91,7 +91,7 @@ function _emit_integration!(core::LoopCore, bank::ChannelBank, ch::Int)
         output,
         fs,
         noise_density,
-        band.noise_density_ready,
+        noise_density_ready,
         _driver_carrier_phase_offset(core, ch);
         secondary_code_wiped = _is_secondary_code_wiped(core, ch, bank.states[ch]),
         sample_index_offset = offset,
@@ -109,7 +109,7 @@ function _emit_integration!(core::LoopCore, bank::ChannelBank, ch::Int)
     # command in force; the satellite's command stays its driver's, which the
     # passenger follows.
     flags = UInt32(0)
-    band.noise_density_ready && (flags |= HardwareLoopProtocol.INTEGRATION_HAS_CN0)
+    noise_density_ready && (flags |= HardwareLoopProtocol.INTEGRATION_HAS_CN0)
     _is_secondary_code_removed(core, ch) && (flags |= HardwareLoopProtocol.INTEGRATION_SECONDARY_CODE_WIPED)
     T.partial_first[ch] && (flags |= HardwareLoopProtocol.INTEGRATION_FIRST_AFTER_ARM)
     timeline = T.timeline[ch]
@@ -138,7 +138,7 @@ function _emit_integration!(core::LoopCore, bank::ChannelBank, ch::Int)
         signal_index = T.signal_index[ch],
         num_correlators = get_num_correlators(bank.template),
     )
-    cn0 = band.noise_density_ready ? ustrip(Hz, Unitful.linear(estimate_cn0(state, samples / fs))) : 0.0
+    cn0 = noise_density_ready ? ustrip(Hz, Unitful.linear(estimate_cn0(state, samples / fs))) : 0.0
     publish!(
         ring,
         tag,
@@ -194,13 +194,6 @@ function _emit_integration!(core::LoopCore, bank::ChannelBank, ch::Int)
     nothing
 end
 
-# The noise floor in the shape the estimators combine with the antenna weights:
-# the density for one antenna, the covariance `N₀·I` for `M` — the noise
-# reference measures one density, so the antennas are taken to see equal,
-# uncorrelated noise.
-@inline _noise_density(::AbstractCorrelatorBank{1}, density) = density
-@inline _noise_density(::AbstractCorrelatorBank{M}, density) where {M} =
-    SMatrix{M,M}(ntuple(i -> (i - 1) % (M + 1) == 0 ? density : zero(density), Val(M * M)))
 # The correlator bank's outputs as the fixed tuple a `CorrelatorOutputsEvent` carries.
 @inline function _pack_correlator_outputs(correlator_bank::AbstractCorrelatorBank{1})
     outputs = get_correlator_outputs(correlator_bank)
@@ -309,7 +302,7 @@ function _publish_loop_state!(bank::ChannelBank, core::LoopCore, ch::Int, interv
     core.loop_open && (flags |= HardwareLoopProtocol.STATE_LOOP_OPEN)
     boundary = _to_band(core, T.band[ch], interval_boundary)
     nco_carrier, nco_code = get_nco_command(T.timeline[ch], boundary)
-    cn0 = band.noise_density_ready ?
+    cn0 = last(TrackingLoops.noise_density_and_ready(band.noise_estimator)) ?
         ustrip(Hz, Unitful.linear(estimate_cn0(state, get_last_num_code_periods(state) * _code_period_seconds(bank.signal)))) : 0.0
     ev = LoopStateEvent(
         T.carrier_doppler[ch],
@@ -426,28 +419,10 @@ end
 
 # ── The noise reference ──────────────────────────────────────────────────────
 
-# Close this interval's pooled looks into a density observation and slide the
-# window: `N₀ = Σ|b|² / (looks · samples_per_look · fs)` (unit code amplitude;
-# the reference and the satellites share the device's scale, which divides out
-# of the C/N₀ ratio).
+# Count the intervals the band's noise reference has sat on its noise probe; the records
+# themselves went into the noise window as they arrived.
 function _close_noise_interval!(core::LoopCore, band_index::Int)
-    b = core.bands[band_index]
-    if b.noise_looks > 0 && b.noise_samples_per_look > 0
-        density = b.noise_power / (b.noise_looks * b.noise_samples_per_look * b.entry.sampling_frequency_hz)
-        b.noise_window_index = mod(b.noise_window_index, NOISE_WINDOW_LENGTH) + 1
-        b.noise_window[b.noise_window_index] = density
-        b.noise_window_count = min(b.noise_window_count + 1, NOISE_WINDOW_LENGTH)
-        total = 0.0
-        @inbounds for i = 1:b.noise_window_count
-            total += b.noise_window[i]
-        end
-        mean = total / b.noise_window_count
-        b.noise_density = mean
-        b.noise_density_ready = isfinite(mean) && mean > 0
-    end
-    b.noise_power = 0.0
-    b.noise_looks = 0
-    b.noise_intervals_since_rearm += 1
+    core.bands[band_index].noise_intervals_since_rearm += 1
     nothing
 end
 

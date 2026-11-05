@@ -94,13 +94,10 @@ function _arm_in_bank!(bank::ChannelBank, core::LoopCore, ch::Int, cmd::ArmComma
     signal = bank.signal
     bank.states[ch] = reset_post_correlation!(bank.states[ch])
     bank.partial[ch] = zero(bank.template)
-    # A satellite's records are scaled to the software correlator's, which still
-    # carry the signal's code amplitude (post-correlation processing divides it out);
-    # the noise reference's density is per unit code amplitude, so its own
-    # scale divides it out here.
-    device_gain = cmd.replica_amplitude * cmd.code_amplitude
-    T.scale[ch] =
-        cmd.signal_index == 0 ? device_gain : device_gain / Float64(get_code_amplitude(signal))
+    # Records are scaled to the software correlators', which still carry the
+    # signal's code amplitude: post-correlation processing divides it out of a
+    # satellite's, `append_noise_correlator_outputs!` out of the noise reference's.
+    T.scale[ch] = cmd.replica_amplitude * cmd.code_amplitude / Float64(get_code_amplitude(signal))
     T.carrier_phase_offset[ch] = Float64(get_carrier_phase_offset(signal))
     T.secondary_wipe[ch] =
         get_secondary_code_length(signal) > 1 &&
@@ -111,6 +108,13 @@ function _arm_in_bank!(bank::ChannelBank, core::LoopCore, ch::Int, cmd::ArmComma
         cmd.carrier_doppler_hz * Hz,
         cmd.code_doppler_hz * Hz,
     )
+    # A noise reference is programmed with TrackingLoops' noise correlator bank,
+    # whose correlators sit far enough apart for their outputs to be
+    # independent, whatever correlators the arm carries; its records are never
+    # published.
+    correlator_sample_offsets, num_correlators = cmd.signal_index == 0 ?
+        _noise_correlator_sample_offsets(core.bands[T.band[ch]], T.sampling_frequency[ch], signal) :
+        (cmd.correlator_sample_offsets, Int(cmd.num_correlators))
     # The band's entry says where the channel's samples come from and at what rate.
     entry = core.bands[T.band[ch]].entry
     spec = ArmSpec(
@@ -120,8 +124,8 @@ function _arm_in_bank!(bank::ChannelBank, core::LoopCore, ch::Int, cmd::ArmComma
         cmd.code_doppler_hz,
         cmd.code_phase_chips,
         cmd.application_sample_index,
-        cmd.correlator_sample_offsets,
-        Int(cmd.num_correlators),
+        correlator_sample_offsets,
+        num_correlators,
         Int(cmd.band),
         Int(entry.rf_input),
         Int(entry.device_index),
@@ -183,11 +187,11 @@ function _handle_arm!(core::LoopCore, tag::CommandTag, cmd::ArmCommand)
         b = core.bands[band]
         b.noise_channel = ch
         b.noise_prn = Int(cmd.prn)
+        b.noise_code_phase = cmd.code_phase_chips
+        b.noise_carrier_doppler = cmd.carrier_doppler_hz
         b.noise_replica_amplitude = cmd.replica_amplitude
         b.noise_code_amplitude = cmd.code_amplitude
         b.noise_intervals_since_rearm = 0
-        b.noise_power = 0.0
-        b.noise_looks = 0
     elseif cmd.signal_index == 1
         _link_passengers!(core, cmd.group_key, Int(cmd.prn), ch)
     else
@@ -363,51 +367,60 @@ function confirm_arms!(core::LoopCore)
 end
 
 # Re-arm each band's noise reference onto a fresh noise probe every
-# `noise_rearm_nco_updates` NCO updates: the next PRN of the family, a uniform code phase and a
-# carrier offset within ±5 kHz, so a chance alignment with a live satellite is
-# one observation in the window rather than the window.
+# `noise_rearm_nco_updates` NCO updates: TrackingLoops' `next_noise_probe` draws
+# it from the band's noise estimator — the next PRN the signal has a code for, a
+# uniform code phase and a carrier within the estimator's dither of the
+# intermediate frequency.
 function _rearm_in_bank!(bank::ChannelBank, core::LoopCore, ch::Int, band_index::Int)
     b = core.bands[band_index]
     T = core.channels
     signal = bank.signal
-    num_prns = size(get_codes(signal), 2)
-    prn = mod(b.noise_prn, num_prns) + 1
-    code_phase = _next_uniform!(b) * get_code_length(signal)
-    carrier = (_next_uniform!(b) * 2 - 1) * 5000.0
+    intermediate_frequency = b.entry.intermediate_frequency_hz
+    probe = TrackingLoops.next_noise_probe(b.noise_estimator, signal, intermediate_frequency * Hz)
+    carrier_doppler = ustrip(Hz, probe.carrier_frequency) - intermediate_frequency
     now = sample_count(core.driver, band_index)
+    correlator_sample_offsets, num_correlators = _noise_correlator_sample_offsets(b, T.sampling_frequency[ch], signal)
     # The amplitudes the receiver declared, which the channel's scale divides out.
     spec = ArmSpec(
-        signal, prn, carrier, 0.0, code_phase, now,
-        _template_correlator_sample_offsets(bank.template, T.sampling_frequency[ch], signal), get_num_correlators(bank.template),
+        signal, probe.prn, carrier_doppler, 0.0, probe.code_phase, now, correlator_sample_offsets, num_correlators,
         band_index, Int(b.entry.rf_input), Int(b.entry.device_index), T.sampling_frequency[ch],
         b.noise_replica_amplitude, b.noise_code_amplitude,
     )
     outcome = arm!(core.driver, ch, spec)
     outcome.accepted || return nothing
-    b.noise_prn = prn
-    T.prn[ch] = prn
+    b.noise_prn = probe.prn
+    b.noise_code_phase = probe.code_phase
+    b.noise_carrier_doppler = carrier_doppler
+    T.prn[ch] = probe.prn
     T.confirmed[ch] = false
     b.noise_intervals_since_rearm = 0
-    b.noise_power = 0.0
-    b.noise_looks = 0
     nothing
 end
 
-# The template correlator bank's quantised sample offsets at the channel's
-# rate, as the fixed tuple an arm carries.
+# A correlator bank's quantised sample offsets at the channel's rate, as the
+# fixed tuple an arm carries.
 function _template_correlator_sample_offsets(template::AbstractCorrelatorBank, sampling_frequency_hz::Float64, signal)
     offsets = calc_correlator_sample_offsets(template, sampling_frequency_hz, _chip_rate_hz(signal))
     ntuple(i -> i <= length(offsets) ? Int32(offsets[i]) : Int32(0), Val(5))
+end
+
+# The correlators a band's noise reference is programmed with: its noise
+# correlator bank's sample offsets, and how many.
+function _noise_correlator_sample_offsets(band::BandState, sampling_frequency_hz::Float64, signal)
+    correlator_bank = TrackingLoops.noise_correlator_bank(band.noise_estimator)
+    offsets = _template_correlator_sample_offsets(correlator_bank, sampling_frequency_hz, signal)
+    offsets, get_num_correlators(correlator_bank)
 end
 
 """
     rearm_noise_references!(core)
 
 Re-arm every band's noise reference that has served
-[`LoopConfig`](@ref)`.noise_rearm_nco_updates` NCO updates onto a fresh noise probe:
-the next PRN of its signal, a pseudo-random code phase and a carrier offset within
-±5 kHz, so a chance alignment with a live satellite spoils one observation in
-the noise window rather than the window.
+[`LoopConfig`](@ref)`.noise_rearm_nco_updates` NCO updates onto a fresh noise
+probe drawn by TrackingLoops' `next_noise_probe`: the next PRN of its signal, a
+random code phase and a carrier within ±5 kHz. A noise probe that lines up with a visible but
+untracked satellite biases the density for as long as it is parked, so the
+re-arm interval bounds how much of the noise window one such alignment spoils.
 """
 function rearm_noise_references!(core::LoopCore)
     for (band_index, b) in enumerate(core.bands)

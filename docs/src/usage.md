@@ -37,7 +37,9 @@ the signal, the PRN, the Dopplers and the code phase it measured at
 `application_sample_index`, and the correlators' sample offsets. The core programs the
 device, and answers once the device has confirmed. Here channel 1 tracks the
 satellite and channel 2 becomes the band's noise reference (`signal_index = 0`),
-which the C/N₀ estimate is measured against.
+which the C/N₀ estimate is measured against. A noise reference is programmed
+with TrackingLoops' noise correlator bank, three correlators 1.5 chips apart,
+whatever correlator offsets its arm carries; every re-arm keeps the amplitudes the arm declared.
 
 ```@example usage
 prn, doppler, code_phase = 7, 1200.0, 100.0

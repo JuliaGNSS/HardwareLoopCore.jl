@@ -93,7 +93,7 @@ end
     config = LoopConfig(; nco_update_interval_samples = round(Int, get_code_length(signal) * CORE_FS / 1.023e6), noise_rearm_nco_updates)
     r = run_closed_loop(; seconds = 1.0, signal, code_amplitude, bit_samples = 16_000, config)
     @test 41 < 10log10(r.states[end][2].cn0_hz) < 50
-    @test 0.8 < r.f.core.bands[1].noise_density * CORE_FS < 1.25
+    @test 0.8 < band_noise_density(r.f).value * CORE_FS < 1.25
     @test abs(r.device_doppler - r.true_doppler) < 15.0
     @test abs(r.device_code_error) < 0.1
 end
@@ -145,6 +145,13 @@ end
     prns = [a[2] for a in f.dev.arms if a[1] == 4]
     @test length(prns) >= 4
     @test all(prns[2:end] .!= prns[1:end-1])
-    @test f.core.bands[1].noise_density_ready
-    @test 0.8 < f.core.bands[1].noise_density * CORE_FS < 1.25
+    @test all(in(get_supported_prns(GPSL1CA())), prns)
+    # Programmed with TrackingLoops' noise correlator bank, not the satellites' correlators.
+    correlator = TrackingLoops.noise_correlator_bank(f.core.bands[1].noise_estimator)
+    shifts = HardwareLoopCore._template_correlator_sample_offsets(correlator, CORE_FS, GPSL1CA())
+    @test f.dev.channels[4].num_correlators == 3
+    @test f.dev.channels[4].correlator_sample_offsets[1:3] == shifts[1:3]
+    noise = band_noise_density(f)
+    @test noise.ready
+    @test 0.8 < noise.value * CORE_FS < 1.25
 end
