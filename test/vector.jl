@@ -246,6 +246,20 @@ end
     @test all(sat.flags & HLP.NAV_SAT_BIT_OR_SECONDARY_CODE_SYNCED != 0 for (_, sat) in nav.satellites[end-1:end])
 end
 
+@testset "Only an update the navigation filter ran publishes the filter's solution" begin
+    # A scalar fix, the scalar fix that seeds the filter (vector tracking is
+    # active after that update), a filter update, and the filter's update on the
+    # update it falls back, as TrackingLoops reports them.
+    status(active, seeded, fell_back, from_filter) =
+        TrackingLoops.VectorTrackingStatus(active, NaN * u"m", NaN * u"m", 0.0u"s", 0, seeded, fell_back, false, from_filter)
+    pvt = TrackingLoops.PositionVelocityTime.PVTSolution()
+    filter_solution(s) = HardwareLoopCore._nav_solution_event(1, pvt, s).flags & HLP.NAV_SOLUTION_FROM_NAV_FILTER != 0
+    @test !filter_solution(status(false, false, false, false))
+    @test !filter_solution(status(true, true, false, false))
+    @test filter_solution(status(true, false, false, true))
+    @test filter_solution(status(false, false, true, true))
+end
+
 @testset "A satellite's release is published only by the update that made it" begin
     # TrackingLoops keeps the latest release in the report, dated by its update.
     report = (; release_reason = TrackingLoops.VT_FALLBACK, release_update_index = 5)
