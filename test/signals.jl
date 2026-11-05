@@ -230,8 +230,11 @@ end
               strobe_record(k * CORE_EPOCH))
         service_pass!(f.core; wait_ms = 0)
     end
-    @test f.core.bands[1].noise_density_ready
-    @test 0.9 < f.core.bands[1].noise_density * CORE_FS < 1.1
+    noise = band_noise_density(f)
+    @test noise.ready
+    # Each antenna's own density, off the measured covariance.
+    @test length(noise.value) == 2
+    @test all(d -> 0.9 < d * CORE_FS < 1.1, noise.value)
     # The satellite reads its C/N₀ against it: 0.1² · 4 MS/s is 46 dBHz.
     ev = drain_events!(f, 1)
     @test last(ev.records)[2].flags & HLP.RECORD_HAS_CN0 != 0

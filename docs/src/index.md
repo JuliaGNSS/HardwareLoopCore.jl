@@ -91,10 +91,11 @@ Current limitations:
 - A record carries at most five taps and ten tap × antenna values
   ([`MAX_RECORD_TAPS`](@ref)).
 - With several antennas, the core does no beamforming. The noise reference
-  measures one density, and the antennas are taken to see equal, uncorrelated
-  noise.
+  measures the antennas' noise covariance, which each satellite's C/N₀ reads
+  through its post-correlation filter.
 - C/N₀ needs a noise reference: one hardware channel per band armed on a
-  decoy PRN. Without one, no C/N₀ is published.
+  decoy PRN, whose records fill TrackingLoops' `CorrelatorNoiseEstimator`
+  window (one second). Without one, no C/N₀ is published.
 - [`overflowed_channels!`](@ref) is part of the driver API but the core does
   not read it yet. Lost records are detected from gaps in each channel's
   records instead.

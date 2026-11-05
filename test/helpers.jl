@@ -139,3 +139,12 @@ function run_closed_loop(; record_delay = 0, seconds = 1.4, prn = 11, true_doppl
        device_doppler = f.dev.channels[1].carrier_doppler, true_doppler)
 end
 
+# A band's noise density off its noise estimator, in 1/Hz, and whether the
+# C/N₀ may read it: a number for one antenna, each antenna's own density (the
+# covariance's diagonal) for several.
+function band_noise_density(f; band = 1)
+    density, ready = TrackingLoops.noise_density_and_ready(f.core.bands[band].noise_estimator)
+    value = density isa Number ? ustrip(Hz^-1, density) :
+        [real(ustrip(Hz^-1, density[i, i])) for i in axes(density, 1)]
+    (; ready, value)
+end

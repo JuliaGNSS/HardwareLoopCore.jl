@@ -97,9 +97,9 @@ record-to-command latency, the tighter the loop.
 The [`ArmSpec`](@ref) carries the replica and code amplitudes the receiver
 declared: the gain of the device's carrier (e.g. a ±127 table) and the RMS of
 its code replica (1 for a ±1 code, ≈19.9 for GNSSSignals' integer CBOC table).
-The device reports the raw sums. The core divides a satellite's by
+The device reports the raw sums. The core divides every channel's by
 `replica_amplitude × code_amplitude / code amplitude of the signal`, which
-leaves them on the software correlator's scale, and the noise reference's by
-`replica_amplitude × code_amplitude`, which gives the density per unit code
-amplitude that the loop's normalised prompt is compared with. The C/N₀ is
-therefore independent of the device's scale and of the signal's modulation.
+leaves them on the software correlator's scale; TrackingLoops then divides the
+signal's code amplitude out of a satellite's prompt and out of the noise
+reference's density alike. The C/N₀ is therefore independent of the device's
+scale and of the signal's modulation.

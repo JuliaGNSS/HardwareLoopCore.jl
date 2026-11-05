@@ -94,13 +94,10 @@ function _arm_in_bank!(bank::ChannelBank, core::LoopCore, ch::Int, cmd::ArmComma
     signal = bank.signal
     bank.states[ch] = reset_post_correlation!(bank.states[ch])
     bank.partial[ch] = zero(bank.template)
-    # A satellite's records are scaled to the software correlator's, which still
-    # carry the signal's code amplitude (post-correlation processing divides it out);
-    # the noise reference's density is per unit code amplitude, so its own
-    # scale divides it out here.
-    device_gain = cmd.replica_amplitude * cmd.code_amplitude
-    T.scale[ch] =
-        cmd.signal_index == 0 ? device_gain : device_gain / Float64(get_code_amplitude(signal))
+    # Records are scaled to the software correlator's, which still carry the
+    # signal's code amplitude: post-correlation processing divides it out of a
+    # satellite's, `append_noise_taps!` out of the noise reference's.
+    T.scale[ch] = cmd.replica_amplitude * cmd.code_amplitude / Float64(get_code_amplitude(signal))
     T.carrier_phase_offset[ch] = Float64(get_carrier_phase_offset(signal))
     T.secondary_wipe[ch] =
         get_secondary_code_length(signal) > 1 &&
@@ -111,6 +108,12 @@ function _arm_in_bank!(bank::ChannelBank, core::LoopCore, ch::Int, cmd::ArmComma
         cmd.carrier_doppler_hz * Hz,
         cmd.code_doppler_hz * Hz,
     )
+    # A noise reference is programmed with TrackingLoops' noise correlator, whose
+    # taps sit far enough apart to be independent looks, whatever taps the
+    # arm carries; its records are never published.
+    tap_sample_shifts, num_taps = cmd.signal_index == 0 ?
+        _noise_tap_shifts(core.bands[Int(cmd.band)], cmd.sampling_freq_hz, signal) :
+        (cmd.tap_sample_shifts, Int(cmd.num_taps))
     spec = ArmSpec(
         signal,
         Int(cmd.prn),
@@ -118,8 +121,8 @@ function _arm_in_bank!(bank::ChannelBank, core::LoopCore, ch::Int, cmd::ArmComma
         cmd.code_doppler_hz,
         cmd.code_phase_chips,
         cmd.valid_at_sample,
-        cmd.tap_sample_shifts,
-        Int(cmd.num_taps),
+        tap_sample_shifts,
+        num_taps,
         Int(cmd.band),
         Int(cmd.rf_input),
         Int(cmd.device_index),
@@ -181,11 +184,11 @@ function _handle_arm!(core::LoopCore, tag::CommandTag, cmd::ArmCommand)
         b = core.bands[band]
         b.noise_channel = ch
         b.noise_prn = Int(cmd.prn)
+        b.noise_code_phase = cmd.code_phase_chips
+        b.noise_carrier_doppler = cmd.carrier_doppler_hz
         b.noise_replica_amplitude = cmd.replica_amplitude
         b.noise_code_amplitude = cmd.code_amplitude
         b.noise_epochs_since_rearm = 0
-        b.noise_power = 0.0
-        b.noise_looks = 0
     elseif cmd.signal_index == 1
         _link_passengers!(core, cmd.group_key, Int(cmd.prn), ch)
     else
@@ -329,51 +332,58 @@ function confirm_arms!(core::LoopCore)
 end
 
 # Re-arm each band's noise reference onto a fresh decoy every
-# `noise_rearm_epochs`: the next PRN of the family, a uniform code phase and a
-# carrier offset within ±5 kHz, so a chance alignment with a live satellite is
-# one observation in the window rather than the window.
+# `noise_rearm_epochs`: TrackingLoops' `next_noise_probe` draws it from the band's
+# noise estimator — the next PRN the signal has a code for, a uniform code phase
+# and a carrier within the estimator's dither of the intermediate frequency.
 function _rearm_in_bank!(bank::ChannelBank, core::LoopCore, ch::Int, band_index::Int)
     b = core.bands[band_index]
     T = core.channels
     signal = bank.signal
-    num_prns = size(get_codes(signal), 2)
-    prn = mod(b.noise_prn, num_prns) + 1
-    code_phase = _next_uniform!(b) * get_code_length(signal)
-    carrier = (_next_uniform!(b) * 2 - 1) * 5000.0
+    intermediate_frequency = b.entry.intermediate_frequency_hz
+    probe = TrackingLoops.next_noise_probe(b.noise_estimator, signal, intermediate_frequency * Hz)
+    carrier_doppler = ustrip(Hz, probe.carrier_frequency) - intermediate_frequency
     now = sample_count(core.driver, band_index)
+    tap_sample_shifts, num_taps = _noise_tap_shifts(b, T.sampling_frequency[ch], signal)
     # The amplitudes the receiver declared, which the channel's scale divides out.
     spec = ArmSpec(
-        signal, prn, carrier, 0.0, code_phase, now,
-        _template_tap_shifts(bank.template, T.sampling_frequency[ch], signal), get_num_correlators(bank.template),
+        signal, probe.prn, carrier_doppler, 0.0, probe.code_phase, now, tap_sample_shifts, num_taps,
         band_index, Int(b.entry.rf_input), Int(b.entry.device_index), T.sampling_frequency[ch],
         b.noise_replica_amplitude, b.noise_code_amplitude,
     )
     outcome = arm!(core.driver, ch, spec)
     outcome.accepted || return nothing
-    b.noise_prn = prn
-    T.prn[ch] = prn
+    b.noise_prn = probe.prn
+    b.noise_code_phase = probe.code_phase
+    b.noise_carrier_doppler = carrier_doppler
+    T.prn[ch] = probe.prn
     T.confirmed[ch] = false
     b.noise_epochs_since_rearm = 0
-    b.noise_power = 0.0
-    b.noise_looks = 0
     nothing
 end
 
-# The template correlator's quantised offsets at the channel's rate, as the
-# fixed tuple an arm carries.
+# A correlator's quantised offsets at the channel's rate, as the fixed tuple an
+# arm carries.
 function _template_tap_shifts(template::AbstractCorrelator, sampling_frequency_hz::Float64, signal)
     shifts = calc_correlator_sample_offsets(template, sampling_frequency_hz, _chip_rate_hz(signal))
     ntuple(i -> i <= length(shifts) ? Int32(shifts[i]) : Int32(0), Val(5))
+end
+
+# The taps a band's noise reference is programmed with: its noise correlator's,
+# and how many.
+function _noise_tap_shifts(band::BandState, sampling_frequency_hz::Float64, signal)
+    correlator = TrackingLoops.noise_correlator(band.noise_estimator)
+    _template_tap_shifts(correlator, sampling_frequency_hz, signal), get_num_correlators(correlator)
 end
 
 """
     rearm_noise_references!(core)
 
 Re-arm every band's noise reference that has served
-[`LoopConfig`](@ref)`.noise_rearm_epochs` epochs onto a fresh decoy: the next
-PRN of its signal, a pseudo-random code phase and a carrier offset within
-±5 kHz, so a chance alignment with a live satellite spoils one observation in
-the noise window rather than the window.
+[`LoopConfig`](@ref)`.noise_rearm_epochs` epochs onto a fresh decoy drawn by
+TrackingLoops' `next_noise_probe`: the next PRN of its signal, a random code
+phase and a carrier within ±5 kHz. A decoy that lines up with a visible but
+untracked satellite biases the density for as long as it is parked, so the
+re-arm interval bounds how much of the noise window one such alignment spoils.
 """
 function rearm_noise_references!(core::LoopCore)
     for (band_index, b) in enumerate(core.bands)

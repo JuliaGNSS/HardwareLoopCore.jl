@@ -314,24 +314,44 @@ end
 
 # ── One record in ────────────────────────────────────────────────────────────
 
-# Pool one noise-reference record: every meaningful tap of every antenna is an
-# independent look at the floor, and `Σ|b|²` over them is what the per-antenna
-# density is measured from. The
-# taps are brought onto the satellites' scale first (the replica and code
-# amplitudes the arm declared, squared): a density left at the device's own
-# amplitude would be off every C/N₀ by that factor squared.
-function _pool_noise_record!(core::LoopCore, ch::Int, band::Int, record::DeviceRecord)
-    b = core.bands[band]
-    n = min(Int(record.num_taps) * max(1, Int(record.num_antennas)), MAX_RECORD_TAPS)
-    power = 0.0
-    @inbounds for i = 1:n
-        power += abs2(record.taps[i])
-    end
-    scale = core.channels.scale[ch]
-    b.noise_power += power / (scale * scale)
-    b.noise_looks += n
-    b.noise_samples_per_look = Int(record.num_integrated_samples)
+# Append one noise-reference record to its band's noise window: the record's
+# taps, brought onto the satellites' scale first (the replica and code
+# amplitudes the arm declared: a density left at the device's own amplitude
+# would be off every C/N₀ by that factor squared), are the looks TrackingLoops'
+# `append_noise_taps!` pools — one power sum for one antenna, the spatial
+# covariance `Σ b·bᴴ` for several — over the record's own sample count.
+function _append_noise_record!(bank::ChannelBank, core::LoopCore, ch::Int, record::DeviceRecord)
+    T = core.channels
+    b = core.bands[T.band[ch]]
+    signal = bank.signal
+    probe = TrackingLoops.NoiseProbe(
+        signal,
+        b.noise_prn,
+        b.noise_code_phase,
+        get_chip_rate(signal),
+        (b.entry.intermediate_frequency_hz + b.noise_carrier_doppler) * Hz,
+    )
+    TrackingLoops.append_noise_taps!(
+        b.noise_estimator,
+        probe,
+        _noise_taps(NumAntennas(b.noise_estimator), record, T.scale[ch]),
+        Int(record.num_integrated_samples),
+        T.sampling_frequency[ch] * Hz,
+    )
     nothing
+end
+
+# A record's meaningful taps, scaled, as the looks `append_noise_taps!` pools:
+# one `ComplexF64` per tap for a single antenna, an `SVector{M}` per tap for `M`
+# (the record is antenna-major). Lazy, so nothing is allocated.
+@inline function _noise_taps(::NumAntennas{1}, record::DeviceRecord, scale::Float64)
+    taps = record.taps
+    (taps[i] / scale for i = 1:min(Int(record.num_taps), MAX_RECORD_TAPS))
+end
+@inline function _noise_taps(::NumAntennas{M}, record::DeviceRecord, scale::Float64) where {M}
+    taps = record.taps
+    num_taps = min(Int(record.num_taps), MAX_RECORD_TAPS ÷ M)
+    (SVector{M,ComplexF64}(ntuple(a -> taps[(a-1)*num_taps+i] / scale, Val(M))) for i = 1:num_taps)
 end
 
 function _ingest_in_bank!(bank::ChannelBank, core::LoopCore, ch::Int, record::DeviceRecord)
@@ -357,8 +377,8 @@ end
     ingest_record!(core, record)
 
 Route one device record: drop it as stale when its channel is free, unconfirmed,
-holds another PRN or its integration began before the confirmed arm; pool it
-into its band's noise reference when the channel is one; otherwise add it to
+holds another PRN or its integration began before the confirmed arm; append it
+to its band's noise window when the channel is the noise reference; otherwise add it to
 the channel's open predetection integration, stepping the loop whenever one is
 completed.
 """
@@ -381,7 +401,7 @@ function ingest_record!(core::LoopCore, record::DeviceRecord)
         return nothing
     end
     if T.signal_index[ch] == 0
-        _pool_noise_record!(core, ch, T.band[ch], record)
+        with_bank(_append_noise_record!, core, ch, core, ch, record)
         return nothing
     end
     with_bank(_ingest_in_bank!, core, ch, core, ch, record)

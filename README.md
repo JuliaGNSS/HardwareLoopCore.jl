@@ -78,8 +78,8 @@ service_pass!(core; wait_ms = 0)
   each satellite, one shared engine,
   and the navigation cycle runs inside the service pass.
 - A record carries at most five taps and ten tap × antenna values.
-- With several antennas there is no beamforming, and the antennas are taken to
-  see equal, uncorrelated noise.
+- With several antennas there is no beamforming; the noise reference measures
+  the antennas' noise covariance.
 - C/N₀ needs a noise reference: one hardware channel per band.
 - `overflowed_channels!` is part of the driver API but not read by the core yet.
 - `SimulatedDevice` is for tests: one band, one antenna, not real-time.

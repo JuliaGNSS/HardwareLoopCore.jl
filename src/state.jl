@@ -103,63 +103,42 @@ function ChannelBank(signal::AbstractGNSSSignal, num_channels::Integer, num_ante
 end
 
 """
-    BandState
+    BandState{E}
 
 One RF band the loop serves: its entry in the band table, the scale from its
 sample counter onto the reference band's, and its noise reference — the
-hardware channel (0 for none), the decoy PRN it replicates, the replica and
-code amplitudes the receiver declared for it (a re-arm programs the same), the
-pooled `Σ|b|²` of this epoch's looks and their count, and the epochs since the
-last re-arm.
+hardware channel (0 for none), the decoy it replicates (PRN, code phase and
+carrier Doppler at the arm), the replica and code amplitudes the receiver
+declared for it (a re-arm programs the same), the epochs since the last
+re-arm, and
+TrackingLoops' `CorrelatorNoiseEstimator`, whose sliding window every record
+of the noise reference is appended to.
 """
-mutable struct BandState
+mutable struct BandState{E<:CorrelatorNoiseEstimator}
     const entry::BandEntry
     const timebase_scale::Float64   # reference samples per one of this band's samples
+    const noise_estimator::E
     noise_channel::Int
     noise_prn::Int
+    noise_code_phase::Float64       # chips, at the arm
+    noise_carrier_doppler::Float64  # Hz off the band's intermediate frequency
     noise_replica_amplitude::Float64
     noise_code_amplitude::Float64
-    noise_power::Float64
-    noise_looks::Int
-    noise_samples_per_look::Int
     noise_epochs_since_rearm::Int
-    noise_density::Float64          # the window's mean density, 1/Hz, 0 for none
-    noise_density_ready::Bool
-    noise_window::Vector{Float64}   # ring of per-epoch densities
-    noise_window_count::Int
-    noise_window_index::Int
-    noise_rng::UInt64               # LCG state for the decoy dither
 end
 
-const NOISE_WINDOW_LENGTH = 1000
-
-function BandState(entry::BandEntry, reference_freq::Float64)
-    BandState(
-        entry,
-        reference_freq / entry.sampling_freq_hz,
-        0,
-        0,
-        1.0,
-        1.0,
-        0.0,
-        0,
-        0,
-        0,
-        0.0,
-        false,
-        zeros(Float64, NOISE_WINDOW_LENGTH),
-        0,
-        0,
-        0x9E3779B97F4A7C15,
-    )
-end
-
-# A small linear congruential generator for the noise reference's dither:
-# `Random` is neither needed nor wanted in a trimmed binary.
-@inline function _next_uniform!(band::BandState)
-    band.noise_rng = band.noise_rng * 6364136223846793005 + 1442695040888963407
-    (band.noise_rng >> 11) * (1.0 / 9007199254740992.0)
-end
+BandState(entry::BandEntry, reference_freq::Float64, num_antennas::NumAntennas) = BandState(
+    entry,
+    reference_freq / entry.sampling_freq_hz,
+    CorrelatorNoiseEstimator(; num_antennas),
+    0,
+    0,
+    0.0,
+    0.0,
+    1.0,
+    1.0,
+    0,
+)
 
 # Per-channel scalar state, all fixed-size vectors indexed by hardware channel.
 # `E` is the tracking loop's per-satellite loop state type.
@@ -266,11 +245,11 @@ one event ring per hardware channel of the driver.
 
 Drive it with [`service_pass!`](@ref) or [`run!`](@ref).
 """
-mutable struct LoopCore{D<:AbstractLoopDriver,Banks<:Tuple,E<:AbstractTrackingLoop,CT<:ChannelTable}
+mutable struct LoopCore{D<:AbstractLoopDriver,Banks<:Tuple,E<:AbstractTrackingLoop,CT<:ChannelTable,BS<:BandState}
     const driver::D
     const banks::Banks
     const channels::CT
-    const bands::Vector{BandState}
+    const bands::Vector{BS}
     const segment::Segment
     const config::LoopConfig
     const tracking_loop::E
@@ -373,7 +352,7 @@ function LoopCore(
         driver,
         banks,
         ChannelTable(n, template),
-        [BandState(entry, reference.sampling_freq_hz) for entry in caps.bands],
+        [BandState(entry, reference.sampling_freq_hz, num_antennas) for entry in caps.bands],
         segment,
         cfg,
         tracking_loop,
