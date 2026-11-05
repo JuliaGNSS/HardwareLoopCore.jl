@@ -7,7 +7,7 @@ AbstractLoopDriver
 DriverCapabilities
 driver_capabilities
 read_records!
-write_word!
+write_nco_command!
 arm!
 release!
 assignment_start
@@ -43,7 +43,7 @@ service_pass!
 run!
 take_records!
 fold_closed_epochs!
-commit_words!
+commit_nco_commands!
 handle_commands!
 confirm_arms!
 rearm_noise_references!

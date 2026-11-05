@@ -4,23 +4,24 @@
 The engine of a hardware correlator's loop process: the dedicated,
 allocation-free process that closes the tracking loops of an FPGA correlator.
 It reads correlator records from a device, folds them epoch by epoch into
-`TrackingLoops`' loop arithmetic, writes the resulting NCO words back to the
-device, and publishes everything a receiver needs into a `HardwareLoopProtocol`
-segment.
+predetection integrations for `TrackingLoops`' tracking loops, writes the
+resulting NCO commands back to the device, and publishes everything a receiver
+needs into a `HardwareLoopProtocol` segment.
 
   - [`AbstractLoopDriver`](@ref) — the driver API a device implements.
   - [`LoopCore`](@ref) and [`service_pass!`](@ref) — the per-channel state and
     the epoch fold that turn device records into loop steps, the commands the
     core executes and the events it publishes.
-  - Vector tracking: built with TrackingLoops' `VectorPLLAndDLL`, the core
+  - Vector tracking: built with TrackingLoops' `VectorTrackingLoop`, the core
     runs every satellite on one navigation engine and publishes its solution
     on the segment's loop-wide nav ring.
   - [`SimulatedDevice`](@ref) — a software correlator behind the driver API, for
     tests and for trying the core without hardware.
 
-The per-record arithmetic — discriminators, loop filters, the bit buffer, the
-C/N₀ estimators, the delay-aware estimator and its NCO timelines — is
-`TrackingLoops`'. Warm service passes allocate nothing.
+The per-integration arithmetic — post-correlation processing, the bit
+synchronizer, the C/N₀ estimators, discriminators, loop filters, the
+delay-compensated tracking loop and its NCO timelines — is `TrackingLoops`'.
+Warm service passes allocate nothing.
 """
 module HardwareLoopCore
 
@@ -31,13 +32,14 @@ using HardwareLoopProtocol
 import Unitful
 using Unitful: uconvert, ustrip, Hz
 using TrackingLoops
-# The core folds records with TrackingLoops' own machinery — the bit buffer,
-# the C/N₀ rings, the correlator helpers — and reads their internals by name.
-for name in names(TrackingLoops; all = true)
-    (name === :TrackingLoops || name === :eval || name === :include) && continue
-    startswith(String(name), "#") && continue
-    @eval import TrackingLoops: $name
-end
+# The documented API TrackingLoops leaves unexported: the correlator building
+# blocks the core sums device records with.
+using TrackingLoops:
+    AbstractCorrelator,
+    calc_correlator_sample_offsets,
+    get_num_correlators,
+    max_num_code_periods_to_integrate,
+    with_accumulators
 
 export AbstractLoopDriver,
     DeviceRecord,
@@ -49,7 +51,7 @@ export AbstractLoopDriver,
     arm_rejected,
     DriverCapabilities,
     read_records!,
-    write_word!,
+    write_nco_command!,
     arm!,
     release!,
     assignment_start,
@@ -61,7 +63,7 @@ export AbstractLoopDriver,
     LATENCY_EDGES_US,
     take_records!,
     fold_closed_epochs!,
-    commit_words!,
+    commit_nco_commands!,
     handle_commands!,
     confirm_arms!,
     service_pass!,

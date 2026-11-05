@@ -35,7 +35,7 @@ end
 end
 
 @testset "A signal the core serves but the device cannot is refused by the device" begin
-    dev = SimulatedDevice(CORE_SYSTEM; sampling_freq = CORE_FS, num_channels = 2)
+    dev = SimulatedDevice(CORE_SYSTEM; sampling_frequency = CORE_FS, num_channels = 2)
     seg = create_segment(nothing, SegmentConfig(; channel_count = 2, bands = dev.bands))
     f = (; dev, seg, core = LoopCore(dev, (CORE_SYSTEM, GalileoE1B()), seg))
     arm!(f, 1, 7; doppler = 0.0, code_phase = 0.0, sequence = 1, signal = "GalileoE1B")
@@ -123,18 +123,18 @@ end
                          UInt8(flags), Int32(backlog), UInt32(0))
     publish!(command_ring(f.seg), CommandTag(HLP.COMMAND_CONFIGURE, 0, 1), configure())
     handle_commands!(f.core)
-    @test (cfg.epoch_length, cfg.commit_lead_samples, cfg.coherent_code_blocks) == (CORE_EPOCH, 0, 1)
+    @test (cfg.epoch_length, cfg.commit_lead_samples, cfg.num_code_periods_to_integrate) == (CORE_EPOCH, 0, 1)
     @test (cfg.max_integration_time, cfg.noise_rearm_epochs, cfg.max_backlog_epochs) == (20e-3, 1000, 4)
     publish!(command_ring(f.seg), CommandTag(HLP.COMMAND_CONFIGURE, 0, 2),
              configure(; epoch = 8000, lead = 100, blocks = 0, tint = 10e-3, rearm = 50, backlog = 2))
     handle_commands!(f.core)
-    @test (cfg.epoch_length, cfg.commit_lead_samples, cfg.coherent_code_blocks) == (8000, 100, 0)
+    @test (cfg.epoch_length, cfg.commit_lead_samples, cfg.num_code_periods_to_integrate) == (8000, 100, 0)
     @test (cfg.max_integration_time, cfg.noise_rearm_epochs, cfg.max_backlog_epochs) == (10e-3, 50, 2)
     @test !cfg.publish_taps
     @test [s.code for s in statuses(f, 1)] == [HLP.STATUS_CONFIGURED, HLP.STATUS_CONFIGURED]
 end
 
-@testset "A passenger follows its driver's words, whichever is armed first" begin
+@testset "A passenger follows its driver's NCO commands, whichever is armed first" begin
     for passenger_first in (false, true)
         f = scripted_fixture()
         driver_arm() = arm!(f, 1, 7; doppler = 100.0, code_phase = 0.0, sequence = 1, group_key = "sat7")
@@ -151,19 +151,19 @@ end
         @test f.core.channels.driver_channel[2] == 1
         @test f.core.channels.driver_channel[3] == 0
         feed_epl!(f, 1, 7, 10)
-        words = Dict(ch => [(w[3], w[4]) for w in f.dev.words if w[1] == ch] for ch = 1:3)
-        @test !isempty(words[1])
-        @test words[2] == words[1]
-        @test isempty(words[3])
+        commands = Dict(ch => [(w[3], w[4]) for w in f.dev.nco_commands if w[1] == ch] for ch = 1:3)
+        @test !isempty(commands[1])
+        @test commands[2] == commands[1]
+        @test isempty(commands[3])
         @test f.core.channels.carrier_doppler[2] == f.core.channels.carrier_doppler[1]
     end
 end
 
-@testset "A passenger's records step its driver's estimator state" begin
-    # GPS L5: the Q pilot drives, the I data channel is its passenger. Every record
-    # of the satellite goes to `step_loop` with the state in the driver channel's
-    # slot; the scalar loop returns the command in force for the passenger's, so the
-    # driver's loop runs exactly as without it.
+@testset "A passenger's integrations step its driver's loop state" begin
+    # GPS L5: the Q pilot drives, the I data channel is its passenger. Every
+    # integration of the satellite goes to `step_loop!` with the state in the
+    # driver channel's slot; the scalar loop returns the command in force for the
+    # passenger's, so the driver's loop runs exactly as without it.
     pilot, data = GPSL5Q(), GPSL5I()
     function driver_dopplers(with_passenger)
         f = scripted_fixture((pilot, data))
@@ -171,7 +171,7 @@ end
         with_passenger && arm!(f, 2, 7; doppler = 100.0, code_phase = 0.0, sequence = 2, signal = "GPSL5I",
                                group_key = "L5-7", signal_index = 2)
         service_pass!(f.core; wait_ms = 0)
-        passenger_state = f.core.channels.estimator[2]
+        passenger_state = f.core.channels.loop_state[2]
         for k = 1:40
             f.dev.sample_count = Int64(k) * CORE_EPOCH
             q_chip = GNSSSignals.secondary_value(get_secondary_code(pilot), 7, mod(k - 1, 20))
@@ -183,11 +183,11 @@ end
             service_pass!(f.core; wait_ms = 0)
         end
         if with_passenger
-            # The passenger's records reached the loop, and left its own slot alone.
+            # The passenger's integrations reached the loop, and left its own slot alone.
             @test f.core.channels.last_record_end[2] == f.core.channels.last_record_end[1] > 0
-            @test f.core.channels.estimator[2] == passenger_state
+            @test f.core.channels.loop_state[2] == passenger_state
         end
-        [(w[3], w[4]) for w in f.dev.words if w[1] == 1], f.core.channels.estimator[1]
+        [(w[3], w[4]) for w in f.dev.nco_commands if w[1] == 1], f.core.channels.loop_state[1]
     end
     alone, alone_state = driver_dopplers(false)
     with_passenger, with_passenger_state = driver_dopplers(true)

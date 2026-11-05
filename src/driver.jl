@@ -13,10 +13,11 @@ Supertype of a hardware correlator's driver as the loop core sees it. Required:
   - [`read_records!`](@ref)`(driver, records)` — append every record the device
     has produced since the last call to `records` (a `Vector{DeviceRecord}`
     sized once), returning how many. Never blocks.
-  - [`write_word!`](@ref)`(driver, channel, carrier_hz, code_hz)` — commit a
-    carrier and code NCO word on `channel`, effective on the next sample. The
-    carrier is a Doppler: the channel's carrier NCO runs at its band's
-    intermediate frequency plus it.
+  - [`write_nco_command!`](@ref)`(driver, channel, carrier_hz, code_hz)` —
+    commit a carrier and code NCO command on `channel`, effective on the next
+    sample. Both are Dopplers: the channel's carrier NCO runs at its band's
+    intermediate frequency plus the carrier Doppler, its code NCO at the chip
+    rate plus the code Doppler.
   - [`arm!`](@ref)`(driver, channel, spec::ArmSpec)` — load a replica and start
     correlating; returns [`ArmOutcome`](@ref).
   - [`release!`](@ref)`(driver, channel)`.
@@ -39,8 +40,8 @@ abstract type AbstractLoopDriver end
 const MAX_RECORD_TAPS = HardwareLoopProtocol.MAX_TAP_VALUES
 
 """
-    DeviceRecord(channel, prn, sample_index, integrated_samples, taps, num_taps;
-                 band = 1, num_ants = 1, code_phase = NaN)
+    DeviceRecord(channel, prn, sample_index, num_integrated_samples, taps, num_taps;
+                 band = 1, num_antennas = 1, code_phase = NaN)
 
 One correlator dump, or one epoch strobe, as the driver hands it to the core.
 `isbits`, so the ingest buffer is one flat vector.
@@ -50,21 +51,21 @@ One correlator dump, or one epoch strobe, as the driver hands it to the core.
     into the core's band table).
   - `prn` — the PRN the channel was correlating, for stale-record detection.
   - `sample_index` — the device counter at the end of the integration.
-  - `integrated_samples` — samples integrated.
+  - `num_integrated_samples` — samples integrated.
   - `code_phase` — the replica's code phase in chips at `sample_index`, `NaN`
     when the device does not report it.
-  - `num_taps`, `num_ants` — how many of `taps` are meaningful: latest tap first,
+  - `num_taps`, `num_antennas` — how many of `taps` are meaningful: latest tap first,
     antenna-major (`taps[(ant - 1) * num_taps + tap]`), raw accumulator sums.
 """
 struct DeviceRecord
     channel::Int32
     band::UInt8
     num_taps::UInt8
-    num_ants::UInt8
+    num_antennas::UInt8
     flags::UInt8
     prn::Int32
     sample_index::Int64
-    integrated_samples::Int32
+    num_integrated_samples::Int32
     pad::Int32
     code_phase::Float64
     taps::NTuple{MAX_RECORD_TAPS,ComplexF64}
@@ -76,22 +77,22 @@ function DeviceRecord(
     channel::Integer,
     prn::Integer,
     sample_index::Integer,
-    integrated_samples::Integer,
+    num_integrated_samples::Integer,
     taps::NTuple{MAX_RECORD_TAPS,ComplexF64},
     num_taps::Integer;
     band::Integer = 1,
-    num_ants::Integer = 1,
+    num_antennas::Integer = 1,
     code_phase::Real = NaN,
 )
     DeviceRecord(
         Int32(channel),
         UInt8(band),
         UInt8(num_taps),
-        UInt8(num_ants),
+        UInt8(num_antennas),
         0x00,
         Int32(prn),
         Int64(sample_index),
-        Int32(integrated_samples),
+        Int32(num_integrated_samples),
         Int32(0),
         Float64(code_phase),
         taps,
@@ -202,7 +203,7 @@ commands; the core, the protocol and the receiver deal in Dopplers only.
 struct DriverCapabilities
     num_channels::Int
     max_taps::Int
-    num_ants::Int
+    num_antennas::Int
     bands::Vector{BandEntry}
 end
 
@@ -218,15 +219,17 @@ every pass. Required for every [`AbstractLoopDriver`](@ref).
 function read_records! end
 
 """
-    write_word!(driver, channel, carrier_hz::Float64, code_hz::Float64) -> Bool
+    write_nco_command!(driver, channel, carrier_hz::Float64, code_hz::Float64) -> Bool
 
-Commit a carrier and a code NCO word (the Dopplers, in Hz) on `channel`,
-effective on the device's next sample. The carrier NCO runs at the band's
-intermediate frequency ([`DriverCapabilities`](@ref)) plus `carrier_hz`. Return `false` if the device refused the
-word (e.g. the channel is not running), which the core counts as rejected.
+Commit a carrier and a code NCO command (the Dopplers, in Hz) on `channel`,
+effective on the device's next sample; the driver encodes it into its NCOs'
+words. The carrier NCO runs at the band's intermediate frequency
+([`DriverCapabilities`](@ref)) plus `carrier_hz`. Return `false` if the device
+refused the command (e.g. the channel is not running), which the core counts
+as rejected and cancels from the channel's NCO timeline.
 Required for every [`AbstractLoopDriver`](@ref).
 """
-function write_word! end
+function write_nco_command! end
 
 """
     arm!(driver, channel, spec::ArmSpec) -> ArmOutcome

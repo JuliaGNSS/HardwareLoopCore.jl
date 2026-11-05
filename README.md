@@ -10,23 +10,24 @@
 The engine of a hardware correlator's loop process: the dedicated,
 allocation-free process that sits next to an FPGA correlator, reads every
 correlator record it produces, closes the carrier and code loops, and writes
-the new NCO words back.
+the new NCO commands back.
 
 - `AbstractLoopDriver` — what the core asks of a device: `read_records!`,
-  `write_word!`, `arm!`, `release!`, `assignment_start`, `sample_count`,
+  `write_nco_command!`, `arm!`, `release!`, `assignment_start`, `sample_count`,
   `driver_capabilities`, optionally `wait_records` / `overflowed_channels!`.
 - `LoopCore` — the loop process's whole state: per-signal channel banks, the
   channel table, the epoch clock, the noise references, the
   `HardwareLoopProtocol` segment it publishes into. `service_pass!` is one pass
-  (wait → read → fold closed epochs → commit words → commands → confirm arms →
-  heartbeat); `run!` loops it. A warm pass allocates nothing. Built with
-  TrackingLoops' `VectorPLLAndDLL`, it runs vector tracking and publishes the
+  (wait → read → fold closed epochs → commit NCO commands → commands → confirm
+  arms → heartbeat); `run!` loops it. A warm pass allocates nothing. Built with
+  TrackingLoops' `VectorTrackingLoop`, it runs vector tracking and publishes the
   navigation solution on the segment's nav ring.
 - `SimulatedDevice` — a software correlator behind the driver API, for tests
   and for trying the core without hardware.
 
-The per-record arithmetic (discriminators, loop filters, bit buffer, C/N₀
-estimators, the delay-aware `NCOReferencedPLLAndDLL` and its NCO timelines) is
+The per-integration arithmetic (post-correlation processing, the bit
+synchronizer, C/N₀ estimators, discriminators, loop filters, the
+`DelayCompensatedTrackingLoop` and its NCO timelines) is
 [TrackingLoops.jl](https://github.com/JuliaGNSS/TrackingLoops.jl)'s. The wire contract between the loop process and the receiver is
 [HardwareLoopProtocol.jl](https://github.com/JuliaGNSS/HardwareLoopProtocol.jl).
 
@@ -44,7 +45,7 @@ using HardwareLoopCore, HardwareLoopProtocol, GNSSSignals
 const HLP = HardwareLoopProtocol
 
 signal = GPSL1CA()
-dev = SimulatedDevice(signal; sampling_freq = 4e6, num_channels = 4)
+dev = SimulatedDevice(signal; sampling_frequency = 4e6, num_channels = 4)
 # `nothing` backs the segment with a heap buffer; a loop process passes a file
 # path under /dev/shm, which the receiver attaches to. It publishes the driver's
 # band table, intermediate frequencies included.
@@ -69,10 +70,11 @@ service_pass!(core; wait_ms = 0)
 
 - The signal types, the antenna count and the hardware channel count are fixed
   when the core is constructed.
-- One estimator per core, by default TrackingLoops' `NCOReferencedPLLAndDLL`.
+- One tracking loop per core, by default TrackingLoops'
+  `DelayCompensatedTrackingLoop`.
   Its bandwidths are set loop-wide; the per-arm bandwidths of an `ArmCommand`
   are not applied yet.
-- Vector tracking (`VectorPLLAndDLL`): a data signal or a paired pilot drives
+- Vector tracking (`VectorTrackingLoop`): a data signal or a paired pilot drives
   each satellite, one shared engine,
   and the navigation cycle runs inside the service pass.
 - A record carries at most five taps and ten tap × antenna values.

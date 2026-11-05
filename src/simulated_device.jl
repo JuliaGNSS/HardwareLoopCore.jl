@@ -3,7 +3,7 @@
 # for an FPGA correlator's gateware.
 # It correlates the samples it is handed with the replicas its channels hold,
 # cuts a record per primary code period (and, when told to, inside one), strobes
-# the epoch clock, and applies a committed word on the next sample. Nothing here
+# the epoch clock, and applies a committed NCO command on the next sample. Nothing here
 # is a mock: the loop core really has to close through it.
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -18,7 +18,7 @@ mutable struct SimulatedChannel
     carrier_doppler::Float64    # Hz
     code_phase::Float64         # chips
     code_doppler::Float64       # Hz
-    nominal_code_freq::Float64  # Hz
+    chip_rate::Float64  # Hz
     code_length::Float64        # chips
     tap_shifts::NTuple{SIM_MAX_TAPS,Int32}   # samples, latest tap first
     num_taps::Int
@@ -27,7 +27,7 @@ mutable struct SimulatedChannel
     # code table (GNSSSignals' ±25/±13 CBOC) do. `get_code` is unit RMS.
     gain::Float64
     accumulators::MVector{SIM_MAX_TAPS,ComplexF64}
-    integrated_samples::Int
+    num_integrated_samples::Int
     assignment_start::Int64
 end
 
@@ -38,14 +38,14 @@ SimulatedChannel() = SimulatedChannel(
 )
 
 """
-    SimulatedDevice(signals::Tuple; sampling_freq, num_channels = 6, epoch_length,
+    SimulatedDevice(signals::Tuple; sampling_frequency, num_channels = 6, epoch_length,
                     dump_interval_samples = 0, handover_code_phase_error = 0.0,
                     record_delay_samples = 0, intermediate_frequency = 0.0,
                     band_id = get_band_id(get_band(first(signals))))
     SimulatedDevice(signal; kwargs...)
 
 A simulated hardware correlator for any of `signals` (one band, one antenna) at
-`sampling_freq` (Hz), fed raw samples through [`correlate_chunk!`](@ref) and
+`sampling_frequency` (Hz), fed raw samples through [`correlate_chunk!`](@ref) and
 strobing the epoch clock every `epoch_length` samples (default: one primary
 code period of the first signal).
 
@@ -64,7 +64,7 @@ LO synthesizer lands a fixed number of Hz off).
 mutable struct SimulatedDevice{S<:Tuple} <: AbstractLoopDriver
     const signals::S
     const channels::Vector{SimulatedChannel}
-    const sampling_freq::Float64
+    const sampling_frequency::Float64
     const epoch_length::Int
     const dump_interval_samples::Int
     const handover_code_phase_error::Float64
@@ -75,15 +75,15 @@ mutable struct SimulatedDevice{S<:Tuple} <: AbstractLoopDriver
     # index rather than a shrinking vector, so reading never allocates.
     const records::Vector{DeviceRecord}
     read_head::Int
-    # Every word committed: (channel, device sample it took effect at, carrier, code).
-    const words::Vector{NTuple{4,Float64}}
+    # Every NCO command committed: (channel, device sample it took effect at, carrier, code).
+    const nco_commands::Vector{NTuple{4,Float64}}
     # Every arm accepted, for the tests: (channel, prn, valid_at_sample, sample armed at).
     const arms::Vector{NTuple{4,Int64}}
 end
 
 function SimulatedDevice(
     signals::Tuple{AbstractGNSSSignal,Vararg{AbstractGNSSSignal}};
-    sampling_freq,
+    sampling_frequency,
     num_channels::Integer = 6,
     epoch_length::Union{Nothing,Integer} = nothing,
     dump_interval_samples::Integer = 0,
@@ -92,10 +92,10 @@ function SimulatedDevice(
     intermediate_frequency::Real = 0.0,
     band_id = get_band_id(get_band(first(signals))),
 )
-    fs = sampling_freq isa Real ? Float64(sampling_freq) : Float64(ustrip(Hz, uconvert(Hz, sampling_freq)))
+    fs = sampling_frequency isa Real ? Float64(sampling_frequency) : Float64(ustrip(Hz, uconvert(Hz, sampling_frequency)))
     epoch = something(
         epoch_length,
-        round(Int, get_code_length(first(signals)) * fs / _sim_code_frequency(first(signals))),
+        round(Int, get_code_length(first(signals)) * fs / _sim_chip_rate(first(signals))),
     )
     SimulatedDevice(
         signals,
@@ -116,7 +116,7 @@ end
 
 SimulatedDevice(signal::AbstractGNSSSignal; kwargs...) = SimulatedDevice((signal,); kwargs...)
 
-_sim_code_frequency(signal::AbstractGNSSSignal) = ustrip(Hz, uconvert(Hz, get_code_frequency(signal)))
+_sim_chip_rate(signal::AbstractGNSSSignal) = ustrip(Hz, uconvert(Hz, get_chip_rate(signal)))
 
 # The index of `signal`'s type in the device's tuple, or 0.
 _sim_signal_index(::Tuple{}, signal, k::Int) = 0
@@ -156,12 +156,12 @@ function read_records!(dev::SimulatedDevice, records::Vector{DeviceRecord})
     n
 end
 
-function write_word!(dev::SimulatedDevice, channel::Integer, carrier_hz::Float64, code_hz::Float64)
+function write_nco_command!(dev::SimulatedDevice, channel::Integer, carrier_hz::Float64, code_hz::Float64)
     ch = dev.channels[channel]
     ch.active || return false
     ch.carrier_doppler = carrier_hz
     ch.code_doppler = code_hz
-    push!(dev.words, (Float64(channel), Float64(dev.sample_count), carrier_hz, code_hz))
+    push!(dev.nco_commands, (Float64(channel), Float64(dev.sample_count), carrier_hz, code_hz))
     true
 end
 
@@ -172,7 +172,7 @@ function arm!(dev::SimulatedDevice, channel::Integer, spec::ArmSpec)
     spec.band == 1 || return arm_rejected(HardwareLoopProtocol.REJECT_BAD_CONFIG)
     ch = dev.channels[channel]
     code_length = Float64(get_code_length(spec.signal))
-    nominal = _sim_code_frequency(spec.signal)
+    nominal = _sim_chip_rate(spec.signal)
     code_freq = nominal + spec.code_doppler_hz
     # The handover describes the satellite at `valid_at_sample` on the device's
     # own counter; the phase is propagated over the samples since.
@@ -183,17 +183,17 @@ function arm!(dev::SimulatedDevice, channel::Integer, spec::ArmSpec)
     ch.carrier_doppler = spec.carrier_doppler_hz
     ch.carrier_phase = 0.0
     ch.code_doppler = spec.code_doppler_hz
-    ch.nominal_code_freq = nominal
+    ch.chip_rate = nominal
     ch.code_length = code_length
     ch.code_phase = mod(
-        spec.code_phase_chips + dev.handover_code_phase_error + code_freq * elapsed / dev.sampling_freq,
+        spec.code_phase_chips + dev.handover_code_phase_error + code_freq * elapsed / dev.sampling_frequency,
         code_length,
     )
     ch.tap_shifts = spec.tap_sample_shifts
     ch.num_taps = spec.num_taps
     ch.gain = spec.replica_amplitude * spec.code_amplitude
     ch.accumulators .= 0
-    ch.integrated_samples = 0
+    ch.num_integrated_samples = 0
     ch.assignment_start = dev.sample_count
     push!(dev.arms, (Int64(channel), Int64(spec.prn), spec.valid_at_sample, dev.sample_count))
     ARM_ACCEPTED
@@ -218,14 +218,14 @@ return how many were queued.
 function correlate_chunk!(dev::SimulatedDevice, samples::AbstractVector)
     queued = 0
     channels = dev.channels
-    fs = dev.sampling_freq
+    fs = dev.sampling_frequency
     intermediate_frequency = dev.bands[1].intermediate_frequency_hz
     @inbounds for k in eachindex(samples)
         sample = ComplexF64(samples[k])
         for index in eachindex(channels)
             ch = channels[index]
             ch.active || continue
-            code_freq = ch.nominal_code_freq + ch.code_doppler
+            code_freq = ch.chip_rate + ch.code_doppler
             wipeoff = ch.gain * sample * cis(-2π * ch.carrier_phase)
             for tap = 1:ch.num_taps
                 offset_chips = ch.tap_shifts[tap] * code_freq / fs
@@ -234,17 +234,17 @@ function correlate_chunk!(dev::SimulatedDevice, samples::AbstractVector)
             end
             ch.carrier_phase += (intermediate_frequency + ch.carrier_doppler) / fs
             ch.code_phase += code_freq / fs
-            ch.integrated_samples += 1
+            ch.num_integrated_samples += 1
             wrapped = ch.code_phase >= ch.code_length
             wrapped && (ch.code_phase -= ch.code_length)
-            if wrapped || (dev.dump_interval_samples > 0 && ch.integrated_samples >= dev.dump_interval_samples)
+            if wrapped || (dev.dump_interval_samples > 0 && ch.num_integrated_samples >= dev.dump_interval_samples)
                 push!(
                     dev.records,
                     DeviceRecord(
                         index,
                         ch.prn,
                         dev.sample_count + 1,
-                        ch.integrated_samples,
+                        ch.num_integrated_samples,
                         pack_taps(ch.accumulators),
                         ch.num_taps;
                         code_phase = ch.code_phase,
@@ -252,7 +252,7 @@ function correlate_chunk!(dev::SimulatedDevice, samples::AbstractVector)
                 )
                 queued += 1
                 ch.accumulators .= 0
-                ch.integrated_samples = 0
+                ch.num_integrated_samples = 0
             end
         end
         dev.sample_count += 1

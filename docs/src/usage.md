@@ -18,7 +18,7 @@ const HLP = HardwareLoopProtocol
 
 signal = GPSL1CA()
 fs = 4e6
-dev = SimulatedDevice(signal; sampling_freq = fs, num_channels = 2)
+dev = SimulatedDevice(signal; sampling_frequency = fs, num_channels = 2)
 # The segment publishes the driver's band table (rates and intermediate frequencies).
 seg = create_segment(nothing, SegmentConfig(; channel_count = 2, bands = driver_capabilities(dev).bands))
 core = LoopCore(dev, (signal,), seg)
@@ -94,17 +94,18 @@ for c in 0:1499
     correlate_chunk!(dev, synthesize!(buf, 4000c))
     service_pass!(core; wait_ms = 0)
 end
-(dev.channels[1].carrier_doppler, core.words_committed)
+(dev.channels[1].carrier_doppler, core.nco_commands_committed)
 ```
 
 The loop has pulled the device's carrier NCO from the handover's 1190 Hz to
 the true 1200 Hz. Once bit synchronisation is found, the loop steps once per
-primary code period as before, and the bit buffer integrates the whole bit.
+primary code period as before, and the bit synchronizer integrates the whole
+bit.
 
 ## Reading the events
 
 Each channel has an event ring: status events answer commands, a record event
-follows every loop step, a bit event every navigation bit, and an epoch state
+follows every predetection integration, a bit event every navigation bit, and an epoch state
 closes every epoch. The receiver drains it:
 
 ```@example usage
@@ -140,7 +141,7 @@ tag, state = read_snapshot(snapshot_slot(seg, 1))
 
 ## Vector tracking
 
-Built with TrackingLoops' `VectorPLLAndDLL`, the core closes every satellite's
+Built with TrackingLoops' `VectorTrackingLoop`, the core closes every satellite's
 loops through one shared navigation engine and publishes each navigation cycle
 on the segment's loop-wide nav ring: a `NavSatelliteEvent` per armed driver
 channel, then the `NavSolutionEvent`, which is also written into the nav
@@ -149,32 +150,33 @@ takes the position from the loop instead of decoding the bits itself; with the
 scalar loops it is `NAV_NONE` and the nav ring stays empty.
 
 ```julia
-estimator = VectorPLLAndDLL(GPSL1CA(); inner = NCOReferencedPLLAndDLL())
-core = LoopCore(dev, (GPSL1CA(),), seg; estimator)
+tracking_loop = VectorTrackingLoop(GPSL1CA(); scalar_loop = DelayCompensatedTrackingLoop())
+core = LoopCore(dev, (GPSL1CA(),), seg; tracking_loop)
 # … service passes …
 tag, solution = read_nav_snapshot(seg)
 solution.position_ecef_m, solution.flags & HLP.NAV_RUNNING != 0
 ```
 
-The estimator must list every data signal of the core, plain or as the data
-component of a `pilot => data` pair. A pilot drives a satellite only when the
-estimator pairs it, e.g. `VectorPLLAndDLL(GPSL1C_P() => GPSL1CA(); …)`, and
-the data component's channel is armed as its passenger. Its satellites are
-stepped from the records alone; the core gives each record the satellite's PRN
-and the replica's code phase, and keeps stepping them through a stale backlog
-so the engine never starves.
+The tracking loop must list every data signal of the core, plain or as the
+data component of a `pilot => data` pair. A pilot drives a satellite only when
+the tracking loop pairs it, e.g. `VectorTrackingLoop(GPSL1C_P() => GPSL1CA();
+…)`, and the data component's channel is armed as its passenger. Its
+satellites are stepped from the integrations alone; the core gives each
+integration the satellite's PRN and the replica's code phase, and keeps
+stepping them through a stale backlog so the engine never starves.
 
 ## Diagnostics
 
 The core counts what went wrong instead of throwing on the service path. Among
 the counters on a [`LoopCore`](@ref): `stale_dumps` (records for a channel that
 was free, re-armed or not yet confirmed), `lost_record_gaps` (records that
-never arrived), `words_late` and `words_rejected`, `dropped_records` (ingest
-buffer full), and `latency_hist`, a histogram of the record-to-word latency over
+never arrived), `nco_commands_late` and `nco_commands_rejected`,
+`dropped_records` (ingest buffer full), and `latency_hist`, a histogram of the
+record-to-command latency over
 [`LATENCY_EDGES_US`](@ref). In vector mode, `nav_events_published` counts the
 nav ring's events and `max_nav_cycle_ns` is the longest pass that ran a
 navigation cycle.
 
 ```@example usage
-(core.stale_dumps, core.lost_record_gaps, core.words_late, core.max_record_age_us)
+(core.stale_dumps, core.lost_record_gaps, core.nco_commands_late, core.max_record_age_us)
 ```

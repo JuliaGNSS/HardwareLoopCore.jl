@@ -14,7 +14,7 @@ A driver implements these methods:
 |---|---|---|
 | [`driver_capabilities`](@ref)`(d)` | once, when the core is built | the channel count, the widest tap layout, the antennas and the band table |
 | [`read_records!`](@ref)`(d, records)` | every pass | appends every new [`DeviceRecord`](@ref) and returns how many; never blocks |
-| [`write_word!`](@ref)`(d, ch, carrier_hz, code_hz)` | after a fold that stepped `ch` | commits the NCO word, effective on the next sample |
+| [`write_nco_command!`](@ref)`(d, ch, carrier_hz, code_hz)` | after a fold that stepped `ch` | commits the NCO command, effective on the next sample |
 | [`arm!`](@ref)`(d, ch, spec)` | on an arm command, and on a noise-reference re-arm | programs the replica in the [`ArmSpec`](@ref); returns [`ARM_ACCEPTED`](@ref) or [`arm_rejected`](@ref)`(reason)` |
 | [`release!`](@ref)`(d, ch)` | on a release command, or a failed arm | stops the channel |
 | [`assignment_start`](@ref)`(d, ch)` | every pass while an arm is unconfirmed, and per record | the sample the current assignment took effect at |
@@ -33,7 +33,7 @@ Each band in [`DriverCapabilities`](@ref) is a `BandEntry`, and its
 `intermediate_frequency_hz` is where a signal at zero Doppler sits in the band's
 samples. The core and the receiver deal in Dopplers only: the driver runs every
 carrier NCO of the band at that IF plus the Doppler the core commands, in
-[`arm!`](@ref) and [`write_word!`](@ref) alike.
+[`arm!`](@ref) and [`write_nco_command!`](@ref) alike.
 
 Report the IF the front end actually produces, including any fixed offset its
 tuning leaves. An RTL-SDR's LO synthesizer, for one, lands a fixed number of Hz
@@ -59,9 +59,9 @@ same IF from the segment, for example to acquire around it.
 
 The records must tile each channel's sample axis: a dump starts where the
 previous one ended. The core infers a lost record from a gap, restarts the
-navigation bit clock, and counts it. A dump normally ends on a primary-code
-boundary; a device may also cut dumps inside a code period, and the core
-accumulates them up to the boundary.
+navigation bit clock, and counts it. A dump normally ends on a primary code
+period boundary; a device may also cut dumps inside a code period, and the
+core sums them up to the boundary.
 
 The tap layout of a dump must match the layout the core's correlator expects
 for the signal (three taps for the default early–prompt–late correlator);
@@ -83,13 +83,14 @@ returns `typemax(Int64)`, and the core drops the channel's records as stale. If
 the device cannot start the assignment after all, it returns `typemin(Int64)`;
 the core rejects the arm towards the receiver and releases the channel.
 
-A word written with [`write_word!`](@ref) applies from the device's next
-sample. The core reads [`sample_count`](@ref) right after the write and
-corrects the channel's NCO timeline to where the word really landed, so a
-record that straddles a word change is credited with the weighted mean of both
-words. Records may arrive late — the delay-aware estimator accounts for the
-words committed since — but the shorter the record-to-word latency, the
-tighter the loop.
+A command written with [`write_nco_command!`](@ref) applies from the device's
+next sample. The core reads [`sample_count`](@ref) right after the write and
+confirms the command in the channel's NCO timeline at the sample it really
+took effect at, so a record that straddles a command change is credited with
+the weighted mean of both commands; a command the driver refuses is cancelled
+from the timeline. Records may arrive late — the delay-compensated tracking
+loop accounts for the commands written since — but the shorter the
+record-to-command latency, the tighter the loop.
 
 ## Amplitudes
 

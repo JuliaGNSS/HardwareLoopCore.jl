@@ -85,12 +85,12 @@ end
 
 @testset "A post-sync record that overshoots the bit boundary drops sync" begin
     f = armed_fixture()
-    # Bits flip every 20 records; after record 219 the bit buffer has 19 of
-    # bit 11's 20 blocks.
+    # Bits flip every 20 records; after record 219 the bit synchronizer has 19 of
+    # bit 11's 20 code periods.
     feed_epl!(f, 1, 7, 219)
     @test drain_events!(f, 1).states[end][2].flags & HLP.STATE_SYNC_FOUND != 0
     # One record spanning records 220 and 221: it closes bit 11 and spills a
-    # block past the boundary.
+    # code period past the boundary.
     f.dev.sample_count = 221CORE_EPOCH
     push!(f.dev.queue, epl_record(1, 7, 221CORE_EPOCH, 1.0; samples = 2CORE_EPOCH),
           strobe_record(220CORE_EPOCH), strobe_record(221CORE_EPOCH))
@@ -140,7 +140,7 @@ end
     f = armed_fixture()
     feed_epl!(f, 1, 7, 3)
     drain_events!(f, 1)
-    words = length(f.dev.words)
+    commands = length(f.dev.nco_commands)
     # Ten epochs of records arrive at once, long after they were cut.
     for k = 4:13
         push!(f.dev.queue, epl_record(1, 7, k * CORE_EPOCH, 1.0), strobe_record(k * CORE_EPOCH))
@@ -153,18 +153,20 @@ end
     # The oldest epochs only observe; the recent ones step the loop again.
     @test observation[1] && !observation[end]
     @test length(ev.records) == 10
-    @test length(f.dev.words) == words + 1
+    @test length(f.dev.nco_commands) == commands + 1
 end
 
-@testset "Words the device refuses, or that are not finite, are counted" begin
+@testset "NCO commands the device refuses, or that are not finite, are counted" begin
     f = armed_fixture()
-    f.dev.accept_words = false
-    # A record is folded in the pass after it ends: three records, two words.
+    f.dev.accept_nco_commands = false
+    # A record is folded in the pass after it ends: three records, two NCO commands.
     feed_epl!(f, 1, 7, 3)
-    @test f.core.words_rejected == 2
-    @test f.core.words_committed == 0
-    f.dev.accept_words = true
-    # A record of NaN taps steers the loop to NaN: that word is never scheduled.
+    @test f.core.nco_commands_rejected == 2
+    @test f.core.nco_commands_committed == 0
+    # Refused commands are cancelled: the timeline keeps the handover's.
+    @test get_nco_command(f.core.channels.timeline[1], typemax(Int64)) == NCOCommand(100.0, 100.0 / 1540)
+    f.dev.accept_nco_commands = true
+    # A record of NaN taps steers the loop to NaN: that command is never scheduled.
     nan_taps = pack_taps(fill(complex(NaN, NaN), 3))
     for k = 4:5
         f.dev.sample_count = k * CORE_EPOCH
@@ -172,9 +174,9 @@ end
         push!(f.dev.queue, strobe_record(k * CORE_EPOCH))
         service_pass!(f.core; wait_ms = 0)
     end
-    @test f.core.words_rejected == 3
-    @test f.core.words_committed == 1
-    @test all(isfinite(w[3]) && isfinite(w[4]) for w in f.dev.words)
+    @test f.core.nco_commands_rejected == 3
+    @test f.core.nco_commands_committed == 1
+    @test all(isfinite(w[3]) && isfinite(w[4]) for w in f.dev.nco_commands)
 end
 
 @testset "Without a reported code phase the code phase is dead-reckoned" begin

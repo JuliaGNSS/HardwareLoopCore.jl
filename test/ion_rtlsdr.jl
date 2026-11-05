@@ -1,7 +1,7 @@
 # Vector tracking closed through the simulated device on a real recording: the
 # ION RTL-SDR capture (GPS L1 C/A, 60 s, 2.048 MS/s, 8-bit offset-binary I/Q at
 # zero IF), correlated by `SimulatedDevice`, the loops closed by the core's
-# `VectorPLLAndDLL`, and everything asserted from the segment's nav ring and
+# `VectorTrackingLoop`, and everything asserted from the segment's nav ring and
 # snapshot, as a receiver would read it. GNSSReceiver's
 # `test/ion_rtlsdr_integration.jl` runs the same recording through the software
 # receiver; its regression fix is the reference here.
@@ -64,7 +64,7 @@ end
 # 10 ms, arm them and a noise reference, then one service pass per code period.
 function run_ion_vector(file; record_delay_epochs)
     num_channels = length(ION_PRNS) + 1
-    dev = SimulatedDevice(GPSL1CA(); sampling_freq = ION_FS, num_channels,
+    dev = SimulatedDevice(GPSL1CA(); sampling_frequency = ION_FS, num_channels,
                           record_delay_samples = record_delay_epochs * ION_EPOCH,
                           intermediate_frequency = ION_INTERMEDIATE_FREQUENCY)
     seg = create_segment(nothing, SegmentConfig(; channel_count = num_channels, bands = dev.bands))
@@ -74,8 +74,8 @@ function run_ion_vector(file; record_delay_epochs)
                        interm_freq = band_table(seg)[1].intermediate_frequency_hz * Hz,
                        num_coherently_integrated_code_periods = 2, num_noncoherent_accumulations = 5,
                        subsample_interpolation = true)
-    estimator = VectorPLLAndDLL(GPSL1CA(); inner = NCOReferencedPLLAndDLL(), approximate_year = 2017)
-    core = LoopCore(dev, (GPSL1CA(),), seg; estimator)
+    tracking_loop = VectorTrackingLoop(GPSL1CA(); scalar_loop = DelayCompensatedTrackingLoop(), approximate_year = 2017)
+    core = LoopCore(dev, (GPSL1CA(),), seg; tracking_loop)
     shifts = HardwareLoopCore._template_tap_shifts(core.banks[1].template, ION_FS, GPSL1CA())
     commands = command_ring(seg)
     for (ch, acq) in enumerate(acquired)
@@ -104,8 +104,8 @@ function run_ion_vector(file; record_delay_epochs)
             read_ion_samples!(buf, raw, io)
             correlate_chunk!(dev, buf)
             allocated = @allocated service_pass!(core; wait_ms = 0)
-            # The device's log of every word it took, which would grow.
-            empty!(dev.words)
+            # The device's log of every NCO command it took, which would grow.
+            empty!(dev.nco_commands)
             # Warm once the filter has run a cycle past the one that seeded it
             # (the engine sizes its member report on those two): from then on
             # every pass — the cycles, the UKF and the nav publish included —
@@ -134,8 +134,8 @@ end
 @testset "Vector tracking on the ION RTL-SDR recording ($delay-epoch record delay)" for delay in (0, 2)
     r = run_ion_vector(ion_recording(); record_delay_epochs = delay)
     @test !isempty(r.solutions)
-    @test r.core.words_late == 0
-    @test r.core.words_rejected == 0
+    @test r.core.nco_commands_late == 0
+    @test r.core.nco_commands_rejected == 0
     @test consumer_lost(nav_ring(r.seg)) == 0
     # The filter seeds from the engine's first scalar fix (the navigation data
     # takes some 30 s to decode) and runs to the end.

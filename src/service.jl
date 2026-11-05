@@ -1,6 +1,6 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # One service pass, and the loop around it:
-#   wait for records → read → fold closed epochs → commit the words →
+#   wait for records → read → fold closed epochs → commit the NCO commands →
 #   drain commands → confirm arms → re-arm noise references → heartbeat.
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -23,7 +23,7 @@ function service_pass!(core::LoopCore; wait_ms::Integer = 1)
         age_us > core.max_record_age_us && (core.max_record_age_us = age_us)
     end
     fold_closed_epochs!(core, now_reference)
-    commit_words!(core)
+    commit_nco_commands!(core)
     handle_commands!(core)
     confirm_arms!(core)
     rearm_noise_references!(core)

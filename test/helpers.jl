@@ -13,7 +13,7 @@ function core_fixture(; num_channels = 4, record_delay = 0, handover_error = 0.2
                       signal = CORE_SYSTEM)
     dev = SimulatedDevice(
         signal;
-        sampling_freq = CORE_FS,
+        sampling_frequency = CORE_FS,
         num_channels,
         handover_code_phase_error = handover_error,
         record_delay_samples = record_delay,
@@ -108,7 +108,7 @@ function run_closed_loop(; record_delay = 0, seconds = 1.4, prn = 11, true_doppl
                          signal = CORE_SYSTEM, code_amplitude = 1.0, bit_samples = 80_000)
     f = core_fixture(; record_delay, config, signal)
     id = get_signal_id(signal)
-    num_taps = HardwareLoopCore.get_num_accumulators(f.core.banks[1].template)
+    num_taps = HardwareLoopCore.get_num_correlators(f.core.banks[1].template)
     arm!(f, 1, prn; doppler = true_doppler + handover_doppler_error, code_phase = code_phase0, sequence = 1,
          replica_amplitude, code_amplitude, signal = id, num_taps)
     arm!(f, 4, 30; doppler = 3000.0, code_phase = 500.0, signal_index = 0, sequence = 2,

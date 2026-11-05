@@ -39,7 +39,7 @@ _bank_by_name(banks::Tuple, name::FixedName, k::Int) =
     first(banks).name == name ? k : _bank_by_name(Base.tail(banks), name, k + 1)
 
 # The armed channel that drives the satellite `(group_key, prn)`, or 0.
-function _driver_channel(core::LoopCore, group_key::FixedName, prn::Int, except::Int)
+function _find_driver_channel(core::LoopCore, group_key::FixedName, prn::Int, except::Int)
     T = core.channels
     for ch = 1:core.num_channels
         ch == except && continue
@@ -63,20 +63,19 @@ end
 function _clear_channel!(core::LoopCore, ch::Int)
     T = core.channels
     T.confirmed[ch] = false
-    T.pending_word_sample[ch] = typemin(Int64)
-    T.word_dirty[ch] = false
+    T.pending_command_sample[ch] = typemin(Int64)
+    T.command_dirty[ch] = false
     T.last_record_end[ch] = typemin(Int64)
     T.last_record_samples[ch] = typemin(Int64)
     T.nominal_record_samples[ch] = typemin(Int64)
-    T.block_phase[ch] = NaN
+    T.code_period_phase[ch] = NaN
     T.primary_wraps[ch] = 0
     T.lost_record_samples[ch] = 0
     T.rearm_dead_samples[ch] = 0
     T.bit_clock_lost[ch] = false
     _discard_partial!(core, ch)
     T.partial_first[ch] = true
-    T.pending_blocks[ch] = 0
-    _forget_secondary_phase!(core, ch)
+    _forget_secondary_code_phase!(core, ch)
     T.phase_ref_sample[ch] = typemin(Int64)
     T.anchor_sample[ch] = typemin(Int64)
     T.anchor_code_phase[ch] = NaN
@@ -88,15 +87,15 @@ function _clear_channel!(core::LoopCore, ch::Int)
     nothing
 end
 
-# The signal-typed half of an arm: the fresh per-record state, the amplitude
-# scale, the overlay decision and the driver call.
+# The signal-typed half of an arm: the fresh post-correlation state, the
+# amplitude scale, the secondary code wipe-off decision and the driver call.
 function _arm_in_bank!(bank::ChannelBank, core::LoopCore, ch::Int, cmd::ArmCommand)
     T = core.channels
     signal = bank.signal
-    bank.states[ch] = reset_signal_state(bank.states[ch])
+    bank.states[ch] = reset_post_correlation!(bank.states[ch])
     bank.partial[ch] = zero(bank.template)
     # A satellite's records are scaled to the software correlator's, which still
-    # carry the signal's code amplitude (the loop's `normalize` divides it out);
+    # carry the signal's code amplitude (post-correlation processing divides it out);
     # the noise reference's density is per unit code amplitude, so its own
     # scale divides it out here.
     device_gain = cmd.replica_amplitude * cmd.code_amplitude
@@ -106,8 +105,8 @@ function _arm_in_bank!(bank::ChannelBank, core::LoopCore, ch::Int, cmd::ArmComma
     T.secondary_wipe[ch] =
         get_secondary_code_length(signal) > 1 &&
         cmd.secondary_code_mode == HardwareLoopProtocol.SECONDARY_PRIMARY_ONLY
-    T.estimator[ch] = init_estimator_state(
-        core.estimator,
+    T.loop_state[ch] = init_loop_state(
+        core.tracking_loop,
         signal,
         cmd.carrier_doppler_hz * Hz,
         cmd.code_doppler_hz * Hz,
@@ -137,9 +136,9 @@ function _handle_arm!(core::LoopCore, tag::CommandTag, cmd::ArmCommand)
     1 <= ch <= core.num_channels || return _reject!(core, tag, HardwareLoopProtocol.REJECT_NO_SUCH_CHANNEL)
     bank = _bank_index_by_name(core, cmd.signal)
     bank == 0 && return _reject!(core, tag, HardwareLoopProtocol.REJECT_UNSUPPORTED_SIGNAL)
-    # Vector tracking drives a satellite with a signal its estimator ranges on:
-    # a data signal, or a pilot it pairs with its data component. Any signal may
-    # be a passenger; the estimator decodes the one it pairs with the driver.
+    # Vector tracking drives a satellite with a signal its tracking loop ranges
+    # on: a data signal, or a pilot it pairs with its data component. Any signal
+    # may be a passenger; the loop decodes the one it pairs with the driver.
     if _is_vector(core)
         cmd.signal_index == 1 && !core.vector_banks[bank] &&
             return _reject!(core, tag, HardwareLoopProtocol.REJECT_UNSUPPORTED_SIGNAL)
@@ -165,7 +164,7 @@ function _handle_arm!(core::LoopCore, tag::CommandTag, cmd::ArmCommand)
     T.group_key[ch] = cmd.group_key
     T.arm_sequence[ch] = tag.sequence
     T.want_taps[ch] = cmd.want_taps != 0
-    T.sampling_freq[ch] = cmd.sampling_freq_hz
+    T.sampling_frequency[ch] = cmd.sampling_freq_hz
     T.carrier_doppler[ch] = cmd.carrier_doppler_hz
     T.code_doppler[ch] = cmd.code_doppler_hz
     T.code_phase[ch] = cmd.code_phase_chips
@@ -188,7 +187,7 @@ function _handle_arm!(core::LoopCore, tag::CommandTag, cmd::ArmCommand)
     elseif cmd.signal_index == 1
         _link_passengers!(core, cmd.group_key, Int(cmd.prn), ch)
     else
-        T.driver_channel[ch] = _driver_channel(core, cmd.group_key, Int(cmd.prn), ch)
+        T.driver_channel[ch] = _find_driver_channel(core, cmd.group_key, Int(cmd.prn), ch)
     end
     nothing
 end
@@ -214,7 +213,7 @@ function _handle_configure!(core::LoopCore, tag::CommandTag, cmd::ConfigureComma
     cfg = core.config
     cmd.epoch_length_samples > 0 && (cfg.epoch_length = cmd.epoch_length_samples)
     cmd.commit_lead_samples > 0 && (cfg.commit_lead_samples = Int64(cmd.commit_lead_samples))
-    cmd.coherent_code_blocks >= 0 && cmd.epoch_length_samples > 0 && (cfg.coherent_code_blocks = Int(cmd.coherent_code_blocks))
+    cmd.coherent_code_blocks >= 0 && cmd.epoch_length_samples > 0 && (cfg.num_code_periods_to_integrate = Int(cmd.coherent_code_blocks))
     cmd.max_integration_time_s > 0 && (cfg.max_integration_time = cmd.max_integration_time_s)
     cmd.noise_rearm_epochs > 0 && (cfg.noise_rearm_epochs = Int(cmd.noise_rearm_epochs))
     cmd.max_backlog_epochs > 0 && (cfg.max_backlog_epochs = Int(cmd.max_backlog_epochs))
@@ -342,8 +341,8 @@ function _rearm_in_bank!(bank::ChannelBank, core::LoopCore, ch::Int, band_index:
     now = sample_count(core.driver, band_index)
     spec = ArmSpec(
         signal, prn, carrier, 0.0, code_phase, now,
-        _template_tap_shifts(bank.template, T.sampling_freq[ch], signal), get_num_accumulators(bank.template),
-        band_index, Int(b.entry.rf_input), Int(b.entry.device_index), T.sampling_freq[ch], 1.0, Float64(get_code_amplitude(signal)),
+        _template_tap_shifts(bank.template, T.sampling_frequency[ch], signal), get_num_correlators(bank.template),
+        band_index, Int(b.entry.rf_input), Int(b.entry.device_index), T.sampling_frequency[ch], 1.0, Float64(get_code_amplitude(signal)),
     )
     outcome = arm!(core.driver, ch, spec)
     outcome.accepted || return nothing
@@ -358,8 +357,8 @@ end
 
 # The template correlator's quantised offsets at the channel's rate, as the
 # fixed tuple an arm carries.
-function _template_tap_shifts(template::AbstractCorrelator, sampling_freq_hz::Float64, signal)
-    shifts = get_correlator_sample_shifts(template, sampling_freq_hz, ustrip(Hz, uconvert(Hz, get_code_frequency(signal))))
+function _template_tap_shifts(template::AbstractCorrelator, sampling_frequency_hz::Float64, signal)
+    shifts = calc_correlator_sample_offsets(template, sampling_frequency_hz, _chip_rate_hz(signal))
     ntuple(i -> i <= length(shifts) ? Int32(shifts[i]) : Int32(0), Val(5))
 end
 

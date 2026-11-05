@@ -10,12 +10,13 @@ A receiver built on a hardware correlator runs two processes. The receiver
 process acquires satellites, decides which channel tracks which signal, decodes
 the navigation data and computes positions. The *loop process* sits next to the
 device: it reads every correlator record the device produces, closes the
-carrier and code loops, and writes the new NCO words back within a fraction of
-a millisecond. This package is the engine of that loop process.
+carrier and code loops, and writes the new NCO commands back within a fraction
+of a millisecond. This package is the engine of that loop process.
 
 - [TrackingLoops.jl](https://github.com/JuliaGNSS/TrackingLoops.jl) provides
-  the per-record arithmetic: discriminators, loop filters, bit
-  synchronisation, C/N₀ estimation and the delay-aware estimator.
+  the per-integration arithmetic: post-correlation processing, bit
+  synchronization, C/N₀ estimation, discriminators, loop filters and the
+  tracking loops, the delay-compensated one among them.
 - [HardwareLoopProtocol.jl](https://github.com/JuliaGNSS/HardwareLoopProtocol.jl)
   is the wire contract between the two processes: a shared-memory segment with
   a command ring (receiver → loop) and per channel an event ring and an epoch
@@ -53,38 +54,40 @@ the contract small and stable:
 The core tracks any signal type that GNSSSignals defines and TrackingLoops has
 a default correlator and bit/secondary-code synchronisation for (GPS L1 C/A, L1C, L2C, L5; Galileo E1, E5a, E5b, E6;
 BeiDou B1I, B1C, B2a, B2b, B3I). A loop serves the signal types passed to
-[`LoopCore`](@ref) at construction, mixed freely across channels. Overlay
-(secondary) codes are removed once their phase is known, code periods longer
-than `max_integration_time` are stepped in partial records, and a data
-component can ride on its pilot's NCO words as a passenger. Every record of a
-satellite, the driver's and each passenger's, is folded into its channel's
-`SignalLoopState` and stepped through the estimator with the satellite's one
-estimator state, kept in the driver channel's slot: the estimator, not the
-loop, decides what a passenger's record is for (a scalar loop returns the
-command in force).
+[`LoopCore`](@ref) at construction, mixed freely across channels. Secondary
+codes are wiped off once their phase is known, code periods longer than
+`max_integration_time` are stepped in partial predetection integrations, and a
+data component can ride on its pilot's NCO commands as a passenger. A
+channel's device records are summed into predetection integrations; every
+integration of a satellite, the driver's and each passenger's, is processed
+with its channel's `PostCorrelationState` and stepped through the tracking loop
+with the satellite's one loop state, kept in the driver channel's slot: the
+tracking loop, not the core, decides what a passenger's integration is for (a
+scalar loop returns the command in force).
 
 The test suite closes the loop through [`SimulatedDevice`](@ref) on GPS L1 C/A
-and checks GPS L5 (pilot with overlay, data passenger) and Galileo E1B (partial
-records) with scripted records. The other signals go through the same code
+and checks GPS L5 (pilot with secondary code, data passenger) and Galileo E1B
+(partial integrations) with scripted records. The other signals go through the same code
 paths but have not been run against a device.
 
 Current limitations:
 
 - The signal types, the antenna count and the hardware channel count are
   fixed when the core is constructed.
-- One estimator per core, chosen when it is built (the `estimator` keyword of
-  [`LoopCore`](@ref)): by default TrackingLoops' delay-aware
-  `NCOReferencedPLLAndDLL`. Its bandwidths are set for the whole loop; the
-  per-arm `carrier_loop_bandwidth_hz` and `code_loop_bandwidth_hz` of an
+- One tracking loop per core, chosen when it is built (the `tracking_loop`
+  keyword of [`LoopCore`](@ref)): by default TrackingLoops'
+  `DelayCompensatedTrackingLoop`. Its bandwidths are set for the whole loop;
+  the per-arm `carrier_loop_bandwidth_hz` and `code_loop_bandwidth_hz` of an
   `ArmCommand` are not applied yet.
-- Vector tracking (a `VectorPLLAndDLL` with an `NCOReferencedPLLAndDLL` inner
-  loop): a satellite is driven by a data signal, or by a pilot the estimator
-  pairs with its data component (`pilot => data`), whose passenger channel's
-  records it decodes. A pilot it does not pair is refused as a driver. All
-  satellites share one
-  navigation engine, and its cycle (the scalar PVT or the filter update) runs
-  inside the service pass, in the `step_loop` of one record. Inter-system and
-  inter-frequency biases are not published.
+- Vector tracking (a `VectorTrackingLoop` with a `DelayCompensatedTrackingLoop`
+  as its scalar loop): a satellite is driven by a data signal, or by a pilot
+  the tracking loop pairs with its data component (`pilot => data`), whose
+  passenger channel's integrations it decodes. A pilot it does not pair is
+  refused as a driver. All satellites share one navigation engine, and its
+  cycle (the scalar PVT or the filter update) runs inside the service pass, in
+  the `step_loop!` of one integration. The receiver clock bias, inter-system
+  and inter-frequency biases are not published: the solution's time is the
+  receiver clock corrected.
 - A record carries at most five taps and ten tap × antenna values
   ([`MAX_RECORD_TAPS`](@ref)).
 - With several antennas, the core does no beamforming. The noise reference

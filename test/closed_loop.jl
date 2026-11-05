@@ -1,5 +1,5 @@
 # The loop core closed through the simulated device: arming over the command
-# ring, records folded per epoch, words committed to the device, the events the
+# ring, records folded per epoch, NCO commands written to the device, the events the
 # receiver mirrors — and, once warm, a service pass that allocates nothing.
 
 @testset "Arming answers with STATUS_ARMED at the sample the channel started" begin
@@ -36,16 +36,16 @@ end
     # Pulled in from 20 Hz and a quarter chip off. Once bit sync is found the
     # FLL-assisted loop's Doppler wanders about the truth by several Hz from
     # record to record (Tracking's own software loop does the same on this
-    # signal), so the instantaneous word is judged loosely and its mean over the
+    # signal), so the instantaneous command is judged loosely and its mean over the
     # last half second tightly.
     @test abs(r.device_doppler - r.true_doppler) < 15.0
     mean_doppler = sum(s[2].carrier_doppler_hz for s in r.states[end-499:end]) / 500
     @test abs(mean_doppler - r.true_doppler) < 3.0
     @test abs(r.device_code_error) < 0.1
-    # A word every fold pre-sync, one per bit after it; nothing landed late.
-    @test r.f.core.words_committed > 500
-    @test r.f.core.words_late == 0
-    @test r.f.core.words_rejected == 0
+    # A command every fold pre-sync, one per bit after it; nothing landed late.
+    @test r.f.core.nco_commands_committed > 500
+    @test r.f.core.nco_commands_late == 0
+    @test r.f.core.nco_commands_rejected == 0
     # An epoch state per fold, and the last one is synchronised and anchored.
     @test length(r.states) >= 1390
     last_state = r.states[end][2]
@@ -54,7 +54,7 @@ end
     @test last_state.flags & HLP.STATE_BIT_PHASE_ANCHORED != 0
     @test abs(last_state.carrier_doppler_hz - r.true_doppler) < 15.0
     # C/N₀ from the noise reference: 0.126² · 4 MS/s against unit variance is
-    # 48 dBHz; allow the estimator's spread.
+    # 48 dBHz; allow the C/N₀ estimator's spread.
     @test 44 < 10log10(last_state.cn0_linear_hz) < 50
     # Bits alternate every 20 ms, on the 80 000-sample grid of the synthetic
     # bit stream (offset by the code phase the records are cut on).
@@ -80,13 +80,13 @@ end
 end
 
 @testset "A CBOC satellite and noise reference read the true C/N₀ (code amplitude $code_amplitude)" for code_amplitude in
-                                                                                                    (1.0, get_code_amplitude(GalileoE1B()))
+                                                                                                    (1.0, get_code_amplitude(GalileoE1B(CBOC)))
     # Galileo E1B against an E1B noise reference, declared as a unit-RMS replica
     # or as GNSSSignals' integer CBOC table (RMS ≈ 19.9), the one Tracking.jl
     # correlates with: the density is the unit-variance noise's and the C/N₀
     # the satellite's, 48 dBHz less the BOC code jitter of a second's tracking,
     # either way. Before, a CBOC reference read the density 26 dB high.
-    r = run_closed_loop(; seconds = 1.0, signal = GalileoE1B(), code_amplitude, bit_samples = 16_000)
+    r = run_closed_loop(; seconds = 1.0, signal = GalileoE1B(CBOC), code_amplitude, bit_samples = 16_000)
     @test 41 < 10log10(r.states[end][2].cn0_linear_hz) < 50
     @test 0.8 < r.f.core.bands[1].noise_density * CORE_FS < 1.25
     @test abs(r.device_doppler - r.true_doppler) < 15.0

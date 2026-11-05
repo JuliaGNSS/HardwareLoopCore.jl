@@ -1,10 +1,10 @@
 # A driver whose records the test writes by hand: every branch of the core
 # that a well-behaved simulated FPGA never takes — lost and stale records,
-# refused arms and words, a device that gives up on a handover, several antennas
+# refused arms and NCO commands, a device that gives up on a handover, several antennas
 # and bands — is reached by queueing the record or setting the answer here.
 
 mutable struct ScriptedDriver <: AbstractLoopDriver
-    num_ants::Int
+    num_antennas::Int
     bands::Vector{BandEntry}
     sample_count::Int64
     queue::Vector{DeviceRecord}
@@ -13,21 +13,21 @@ mutable struct ScriptedDriver <: AbstractLoopDriver
     # What the next `arm!` answers, and whether an accepted arm is confirmed at once.
     arm_outcome::ArmOutcome
     confirm_on_arm::Bool
-    accept_words::Bool
+    accept_nco_commands::Bool
     arms::Vector{Tuple{Int,ArmSpec}}
-    words::Vector{Tuple{Int,Int64,Float64,Float64}}
+    nco_commands::Vector{Tuple{Int,Int64,Float64,Float64}}
     releases::Vector{Int}
     waits::Int
 end
 
-function ScriptedDriver(; num_channels = 4, num_ants = 1, bands = [BandEntry("L1", CORE_FS)])
-    ScriptedDriver(num_ants, bands, 0, DeviceRecord[], fill(typemax(Int64), num_channels),
+function ScriptedDriver(; num_channels = 4, num_antennas = 1, bands = [BandEntry("L1", CORE_FS)])
+    ScriptedDriver(num_antennas, bands, 0, DeviceRecord[], fill(typemax(Int64), num_channels),
                    ARM_ACCEPTED, true, true, Tuple{Int,ArmSpec}[], Tuple{Int,Int64,Float64,Float64}[],
                    Int[], 0)
 end
 
 HardwareLoopCore.driver_capabilities(d::ScriptedDriver) =
-    DriverCapabilities(length(d.starts), 5, d.num_ants, d.bands)
+    DriverCapabilities(length(d.starts), 5, d.num_antennas, d.bands)
 HardwareLoopCore.sample_count(d::ScriptedDriver, band::Integer) =
     round(Int64, d.sample_count * d.bands[band].sampling_freq_hz / d.bands[1].sampling_freq_hz)
 HardwareLoopCore.assignment_start(d::ScriptedDriver, channel::Integer) = d.starts[channel]
@@ -40,9 +40,9 @@ function HardwareLoopCore.read_records!(d::ScriptedDriver, records::Vector{Devic
     n
 end
 
-function HardwareLoopCore.write_word!(d::ScriptedDriver, channel::Integer, carrier::Float64, code::Float64)
-    d.accept_words || return false
-    push!(d.words, (Int(channel), d.sample_count, carrier, code))
+function HardwareLoopCore.write_nco_command!(d::ScriptedDriver, channel::Integer, carrier::Float64, code::Float64)
+    d.accept_nco_commands || return false
+    push!(d.nco_commands, (Int(channel), d.sample_count, carrier, code))
     true
 end
 
@@ -60,24 +60,24 @@ function HardwareLoopCore.release!(d::ScriptedDriver, channel::Integer)
 end
 
 # A core over a scripted driver and a heap segment.
-function scripted_fixture(signals = (CORE_SYSTEM,); num_channels = 4, num_ants = 1,
+function scripted_fixture(signals = (CORE_SYSTEM,); num_channels = 4, num_antennas = 1,
                           bands = [BandEntry("L1", CORE_FS)], config = nothing, kwargs...)
-    dev = ScriptedDriver(; num_channels, num_ants, bands)
+    dev = ScriptedDriver(; num_channels, num_antennas, bands)
     seg = create_segment(nothing, SegmentConfig(; channel_count = num_channels, bands))
-    core = LoopCore(dev, signals, seg; config, num_ants = NumAnts(num_ants), kwargs...)
+    core = LoopCore(dev, signals, seg; config, num_antennas = NumAntennas(num_antennas), kwargs...)
     (; dev, seg, core)
 end
 
 # An early/prompt/late record of a GPS L1 C/A satellite perfectly in lock: the
 # prompt carries `amplitude · bit` per sample, the early and late taps half of it.
 function epl_record(channel, prn, sample_end, bit; samples = CORE_EPOCH, amplitude = 1.0,
-                    code_phase = 0.0, num_ants = 1, band = 1)
+                    code_phase = 0.0, num_antennas = 1, band = 1)
     prompt = amplitude * bit * samples
     taps = ComplexF64[]
-    for _ = 1:num_ants
+    for _ = 1:num_antennas
         append!(taps, (prompt / 2, prompt, prompt / 2))
     end
-    DeviceRecord(channel, prn, sample_end, samples, pack_taps(taps), 3; num_ants, band, code_phase)
+    DeviceRecord(channel, prn, sample_end, samples, pack_taps(taps), 3; num_antennas, band, code_phase)
 end
 
 # Queue `count` one-code-period records on `channel` and the epoch strobes, with

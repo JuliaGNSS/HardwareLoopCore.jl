@@ -1,16 +1,16 @@
-# What depends on the signal and the device's record grid: overlay (secondary)
+# What depends on the signal and the device's record grid: secondary
 # codes, records shorter than a code period, dump grids that do not divide the
-# code period, coherent accumulation over a whole symbol, several antennas and
+# code period, coherent integration over a whole bit, several antennas and
 # several bands.
 
-# A pilot record of GPS L5Q in lock: the prompt carries the overlay chip of
+# A pilot record of GPS L5Q in lock: the prompt carries the secondary code chip of
 # code period `k` (1-based) and no data.
 function l5q_record(signal, channel, prn, k; samples = CORE_EPOCH, periods = 1)
     chip = GNSSSignals.secondary_value(get_secondary_code(signal), prn, mod(k - 1, get_secondary_code_length(signal)))
     epl_record(channel, prn, k * CORE_EPOCH, chip; samples, code_phase = 0.0)
 end
 
-@testset "An overlay code is wiped once its phase is known, and never at a guess" begin
+@testset "A secondary code is wiped once its phase is known, and never at a guess" begin
     signal = GPSL5Q()
     f = scripted_fixture((signal,))
     arm!(f, 1, 7; doppler = 0.0, code_phase = 0.0, sequence = 1, signal = "GPSL5Q")
@@ -21,8 +21,8 @@ end
         push!(f.dev.queue, l5q_record(signal, 1, 7, k), strobe_record(k * CORE_EPOCH))
         service_pass!(f.core; wait_ms = 0)
     end
-    polarity() = f.core.banks[1].states[1].last_carrier_phase_polarity
-    # Before sync the record's sign is unknown to the loop; once the overlay is
+    polarity() = f.core.banks[1].states[1].previous_carrier_polarity
+    # Before sync the record's sign is unknown to the loop; once the secondary code is
     # wiped it is the prompt's, and the loop reads it with the four-quadrant
     # discriminators.
     feed!(1)
@@ -33,21 +33,21 @@ end
     @test ev.states[end][2].flags & HLP.STATE_SYNC_FOUND != 0
     wiped = [r.flags & HLP.RECORD_OVERLAY_WIPED != 0 for (_, r) in ev.records]
     @test !wiped[1] && wiped[end]
-    # Wiped, the prompts no longer change sign with the overlay.
+    # Wiped, the prompts no longer change sign with the secondary code.
     @test all(real(r.prompt) > 0 for ((_, r), w) in zip(ev.records, wiped) if w)
-    # Post-sync the code phase wraps at the whole overlay period, not the primary code.
+    # Post-sync the code phase wraps at the whole secondary code period, not the primary code.
     @test HardwareLoopCore._post_sync_code_length(signal) == 10230 * 20
     @test 0 <= f.core.channels.code_phase[1] < 10230 * 20
-    # A record that does not start where the overlay counter stands stops the
+    # A record that does not start where the secondary code phase stands stops the
     # wipe until sync re-seeds the phase.
     foreach(feed!, 202:203)
-    @test f.core.channels.secondary_phase[1] == -1
+    @test f.core.channels.secondary_code_phase[1] == -1
     @test polarity() == 0
     ev = drain_events!(f, 1)
     @test !(last(ev.records)[2].flags & HLP.RECORD_OVERLAY_WIPED != 0)
 end
 
-@testset "An overlay code is not wiped across a record that spans two blocks" begin
+@testset "A secondary code is not wiped across a record that spans two code periods" begin
     signal = GPSL5Q()
     f = scripted_fixture((signal,))
     arm!(f, 1, 7; doppler = 0.0, code_phase = 0.0, sequence = 1, signal = "GPSL5Q")
@@ -57,23 +57,23 @@ end
         push!(f.dev.queue, l5q_record(signal, 1, 7, k), strobe_record(k * CORE_EPOCH))
         service_pass!(f.core; wait_ms = 0)
     end
-    @test f.core.channels.secondary_phase[1] >= 0
+    @test f.core.channels.secondary_code_phase[1] >= 0
     f.dev.sample_count = 202CORE_EPOCH
     push!(f.dev.queue, epl_record(1, 7, 202CORE_EPOCH, 1.0; samples = 2CORE_EPOCH, code_phase = 0.0),
           strobe_record(201CORE_EPOCH), strobe_record(202CORE_EPOCH), strobe_record(203CORE_EPOCH))
     f.dev.sample_count = 203CORE_EPOCH
     drain_events!(f, 1)
     service_pass!(f.core; wait_ms = 0)
-    # That record goes to the loop unwiped; sync still stands, so the overlay
-    # phase is re-seeded from the bit buffer at the end of the same epoch.
+    # That record goes to the loop unwiped; sync still stands, so the secondary
+    # code phase is re-seeded from the bit synchronizer at the end of the same epoch.
     tag, record = last(drain_events!(f, 1).records)
     @test tag.device_sample == 202CORE_EPOCH
     @test record.integrated_samples == 2CORE_EPOCH
     @test record.flags & HLP.RECORD_OVERLAY_WIPED == 0
-    @test f.core.channels.secondary_phase[1] >= 0
+    @test f.core.channels.secondary_code_phase[1] >= 0
 end
 
-@testset "An overlay the receiver wipes itself is left alone" begin
+@testset "A secondary code the receiver wipes itself is left alone" begin
     f = scripted_fixture((GPSL5Q(),))
     arm!(f, 1, 7; doppler = 0.0, code_phase = 0.0, sequence = 1, signal = "GPSL5Q",
          secondary_code_mode = HLP.SECONDARY_WIPEOFF)
@@ -98,7 +98,7 @@ end
     ev = drain_events!(f, 1)
     @test length(ev.records) == 39
     @test all(r.integrated_samples == CORE_EPOCH for (_, r) in ev.records)
-    @test f.core.words_committed >= 38
+    @test f.core.nco_commands_committed >= 38
 end
 
 @testset "Records shorter than a code period are summed into one" begin
@@ -140,11 +140,11 @@ end
     # A 3000-sample grid lands on a boundary every 12 000 samples, and hands
     # over 9000 samples once a whole period past the target in between.
     @test length(ev.records) >= 25
-    @test f.core.words_committed >= 25
+    @test f.core.nco_commands_committed >= 25
 end
 
-@testset "coherent_code_blocks = 0 accumulates one whole symbol after sync" begin
-    cfg = LoopConfig(; epoch_length = CORE_EPOCH, coherent_code_blocks = 0)
+@testset "num_code_periods_to_integrate = 0 integrates one whole bit after sync" begin
+    cfg = LoopConfig(; epoch_length = CORE_EPOCH, num_code_periods_to_integrate = 0)
     f = scripted_fixture(; config = cfg)
     arm!(f, 1, 7; doppler = 0.0, code_phase = 0.0, sequence = 1)
     service_pass!(f.core; wait_ms = 0)
@@ -157,13 +157,13 @@ end
 end
 
 @testset "Two antennas: records, taps events and the loop" begin
-    f = scripted_fixture(; num_ants = 2, config = LoopConfig(; epoch_length = CORE_EPOCH, publish_taps = true))
+    f = scripted_fixture(; num_antennas = 2, config = LoopConfig(; epoch_length = CORE_EPOCH, publish_taps = true))
     arm!(f, 1, 7; doppler = 0.0, code_phase = 0.0, sequence = 1)
     service_pass!(f.core; wait_ms = 0)
     for k = 1:30
         f.dev.sample_count = k * CORE_EPOCH
         taps = ComplexF64[2000, 4000, 2000, 1000, 2000, 1000]   # antenna 2 at half the amplitude
-        push!(f.dev.queue, DeviceRecord(1, 7, k * CORE_EPOCH, CORE_EPOCH, pack_taps(taps), 3; num_ants = 2,
+        push!(f.dev.queue, DeviceRecord(1, 7, k * CORE_EPOCH, CORE_EPOCH, pack_taps(taps), 3; num_antennas = 2,
                                         code_phase = 0.0),
               strobe_record(k * CORE_EPOCH))
         service_pass!(f.core; wait_ms = 0)
@@ -174,7 +174,7 @@ end
     @test ev.taps[end][1].num_taps == 3
     @test ev.taps[end][2].taps[1:6] == (2000, 4000, 2000, 1000, 2000, 1000)
     @test all(iszero, ev.taps[end][2].taps[7:end])
-    @test f.core.words_committed >= 28
+    @test f.core.nco_commands_committed >= 28
 end
 
 @testset "A channel wants its taps even when the loop does not publish them" begin
@@ -209,11 +209,11 @@ end
     # Epoch boundaries on the reference counter, stated on band 2's.
     @test [Int(tag.device_sample) for (tag, _) in ev.states] == [2k * CORE_EPOCH for k = 2:10]
     @test f.core.channels.phase_ref_sample[1] == 20CORE_EPOCH
-    @test f.core.words_committed >= 8
+    @test f.core.nco_commands_committed >= 8
 end
 
 @testset "Two antennas: the noise reference measures the per-antenna density" begin
-    f = scripted_fixture(; num_ants = 2)
+    f = scripted_fixture(; num_antennas = 2)
     arm!(f, 1, 7; doppler = 0.0, code_phase = 0.0, sequence = 1)
     arm!(f, 4, 30; doppler = 0.0, code_phase = 0.0, sequence = 2, signal_index = 0)
     service_pass!(f.core; wait_ms = 0)
@@ -224,9 +224,9 @@ end
         # Every tap of every antenna sums CORE_EPOCH unit-variance samples.
         randn!(rng, noise)
         push!(f.dev.queue,
-              DeviceRecord(4, 30, k * CORE_EPOCH, CORE_EPOCH, pack_taps(noise .* sqrt(CORE_EPOCH)), 3; num_ants = 2),
+              DeviceRecord(4, 30, k * CORE_EPOCH, CORE_EPOCH, pack_taps(noise .* sqrt(CORE_EPOCH)), 3; num_antennas = 2),
               DeviceRecord(1, 7, k * CORE_EPOCH, CORE_EPOCH,
-                           pack_taps(ComplexF64[200, 400, 200, 200, 400, 200]), 3; num_ants = 2, code_phase = 0.0),
+                           pack_taps(ComplexF64[200, 400, 200, 200, 400, 200]), 3; num_antennas = 2, code_phase = 0.0),
               strobe_record(k * CORE_EPOCH))
         service_pass!(f.core; wait_ms = 0)
     end
@@ -239,7 +239,7 @@ end
 end
 
 @testset "A data passenger is read in its pilot driver's carrier frame" begin
-    # GPS L5: the Q pilot drives, the I data channel rides on its words. In the
+    # GPS L5: the Q pilot drives, the I data channel rides on its NCO commands. In the
     # pilot's frame (offset -π/2) the data sits in quadrature to the pilot.
     pilot, data = GPSL5Q(), GPSL5I()
     f = scripted_fixture((pilot, data))
@@ -248,24 +248,24 @@ end
          signal_index = 2)
     service_pass!(f.core; wait_ms = 0)
     @test f.core.channels.driver_channel[2] == 1
-    symbols = [1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0, 1.0, -1.0, -1.0]
+    bits = [1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0, 1.0, -1.0, -1.0]
     for k = 1:400
         f.dev.sample_count = k * CORE_EPOCH
         q_chip = GNSSSignals.secondary_value(get_secondary_code(pilot), 7, mod(k - 1, 20))
         i_chip = GNSSSignals.secondary_value(get_secondary_code(data), 7, mod(k - 1, 10))
-        symbol = symbols[mod(div(k - 1, 10), length(symbols))+1]
+        bit = bits[mod(div(k - 1, 10), length(bits))+1]
         push!(f.dev.queue,
               epl_record(1, 7, k * CORE_EPOCH, q_chip; code_phase = 0.0),
-              epl_record(2, 7, k * CORE_EPOCH, im * symbol * i_chip; code_phase = 0.0),
+              epl_record(2, 7, k * CORE_EPOCH, im * bit * i_chip; code_phase = 0.0),
               strobe_record(k * CORE_EPOCH))
         service_pass!(f.core; wait_ms = 0)
     end
     ev = drain_events!(f, 2)
     @test ev.states[end][2].flags & HLP.STATE_SYNC_FOUND != 0
     @test length(ev.bits) >= 20
-    # The decoded soft bits follow the symbol sequence (up to the polarity).
+    # The decoded soft bits follow the bit sequence (up to the polarity).
     signs = [sign(b.soft_bit) for (_, b) in ev.bits]
-    n = length(symbols)
-    @test any(all(signs[i] == s * symbols[mod(i + shift - 1, n)+1] for i in eachindex(signs))
+    n = length(bits)
+    @test any(all(signs[i] == s * bits[mod(i + shift - 1, n)+1] for i in eachindex(signs))
               for shift = 0:n-1, s in (1, -1))
 end

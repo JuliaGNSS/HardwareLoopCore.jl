@@ -13,18 +13,19 @@ Loop-wide configuration, changed at run time only through a
   - `epoch_length` — the fold epoch in reference-band samples (default: one
     primary code period of the first supported signal).
   - `commit_lead_samples` — how far past the device counter read at the start
-    of a pass the words that pass computes are predicted to land (0). A word
-    is written in the very pass that computes it; the timeline is corrected to
-    the sample it really landed at.
-  - `coherent_code_blocks` — the coherent accumulation ceiling in primary-code
-    blocks once bit/secondary sync is found; `0` for one whole symbol. The
-    default is 1: the loops are tuned for one step per primary code period
-    (an 18 Hz PLL at 1 ms), and stepping them once per 20 ms symbol instead
-    puts the bandwidth–time product at 0.36, where the delay-aware loop
+    of a pass the NCO commands that pass computes are predicted to take effect
+    (0). A command is written in the very pass that computes it; the timeline
+    is confirmed at the sample it really took effect at.
+  - `num_code_periods_to_integrate` — the predetection integration ceiling in
+    primary code periods once bit/secondary sync is found; `0` for one whole
+    bit. The default is 1: the loops are tuned for one step per code period
+    (an 18 Hz PLL at 1 ms), and stepping them once per 20 ms bit instead
+    puts the bandwidth–time product at 0.36, where the delay-compensated loop
     limit-cycles or drifts (measured on the board and reproduced with the
     simulated device: a 48 dBHz satellite's Doppler ran 30 Hz off in six
-    seconds after bit sync). The bit buffer accumulates the symbol itself.
-  - `max_integration_time` — the longest record, in seconds (20 ms).
+    seconds after bit sync). The bit synchronizer integrates the bit itself.
+  - `max_integration_time` — the longest predetection integration, in seconds
+    (20 ms).
   - `max_backlog_epochs` — how many epochs behind the device the fold may run
     before older records are folded observation-only (4).
   - `noise_rearm_epochs` — how often a band's noise reference is re-armed onto
@@ -36,7 +37,7 @@ Loop-wide configuration, changed at run time only through a
 mutable struct LoopConfig
     epoch_length::Int64
     commit_lead_samples::Int64
-    coherent_code_blocks::Int
+    num_code_periods_to_integrate::Int
     max_integration_time::Float64
     max_backlog_epochs::Int
     noise_rearm_epochs::Int
@@ -47,7 +48,7 @@ end
 function LoopConfig(;
     epoch_length::Integer,
     commit_lead_samples::Integer = 0,
-    coherent_code_blocks::Integer = 1,
+    num_code_periods_to_integrate::Integer = 1,
     max_integration_time::Real = 20e-3,
     max_backlog_epochs::Integer = 4,
     noise_rearm_epochs::Integer = 1000,
@@ -59,7 +60,7 @@ function LoopConfig(;
     LoopConfig(
         Int64(epoch_length),
         Int64(commit_lead_samples),
-        Int(coherent_code_blocks),
+        Int(num_code_periods_to_integrate),
         Float64(max_integration_time),
         Int(max_backlog_epochs),
         Int(noise_rearm_epochs),
@@ -73,11 +74,11 @@ end
     ChannelBank{S,C,B,PCF,CN0}
 
 Everything about a hardware channel whose *type* depends on the signal it
-tracks: the signal object, the per-record signal state (bit buffer, C/N₀
-estimator, prompt filter) and the part-accumulated correlator. One bank per
-supported signal type, each with a slot for every hardware channel, so every
-slot is concretely typed and a per-record rebuild stores inline instead of
-boxing.
+tracks: the signal object, its post-correlation state (bit synchronizer,
+C/N₀ estimator, post-correlation filter) and the open predetection
+integration's correlator. One bank per supported signal type, each with a slot
+for every hardware channel, so every slot is concretely typed and a
+per-integration rebuild stores inline instead of boxing.
 """
 struct ChannelBank{S<:AbstractGNSSSignal,C<:AbstractCorrelator,B<:Unsigned,PCF,CN0}
     signal::S
@@ -86,17 +87,17 @@ struct ChannelBank{S<:AbstractGNSSSignal,C<:AbstractCorrelator,B<:Unsigned,PCF,C
     # The host-side correlator whose tap spacing the discriminators read; the
     # device is programmed with exactly its quantised offsets.
     template::C
-    states::Vector{SignalLoopState{B,PCF,CN0}}
+    states::Vector{PostCorrelationState{B,PCF,CN0}}
     partial::Vector{C}
 end
 
-function ChannelBank(signal::AbstractGNSSSignal, num_channels::Integer, num_ants::NumAnts = NumAnts(1))
-    template = get_default_correlator(signal, num_ants)
+function ChannelBank(signal::AbstractGNSSSignal, num_channels::Integer, num_antennas::NumAntennas = NumAntennas(1))
+    template = get_default_correlator(signal, num_antennas)
     ChannelBank(
         signal,
         FixedName(get_signal_id(signal)),
         template,
-        [SignalLoopState(signal) for _ = 1:num_channels],
+        [PostCorrelationState(signal) for _ = 1:num_channels],
         [zero(template) for _ = 1:num_channels],
     )
 end
@@ -155,7 +156,7 @@ end
 end
 
 # Per-channel scalar state, all fixed-size vectors indexed by hardware channel.
-# `E` is the estimator's per-satellite state type.
+# `E` is the tracking loop's per-satellite loop state type.
 struct ChannelTable{E}
     # ── Occupancy ─────────────────────────────────────────────────────────────
     armed::Vector{Bool}
@@ -168,47 +169,46 @@ struct ChannelTable{E}
     arm_sequence::Vector{UInt64}     # the command sequence the arm answers
     want_taps::Vector{Bool}
     driver_channel::Vector{Int}      # a passenger's driver channel (0 for a driver)
-    carrier_phase_offset::Vector{Float64}  # the signal's carrier-phase offset, radians
-    word_dirty::Vector{Bool}         # the loop stepped since the last word was scheduled
+    carrier_phase_offset::Vector{Float64}  # the signal's carrier-phase offset, cycles
+    command_dirty::Vector{Bool}      # the loop stepped since the last command was scheduled
     scale::Vector{Float64}           # accumulator amplitude divisor (replica × code amplitude ratio)
-    sampling_freq::Vector{Float64}   # the channel's band rate, Hz
+    sampling_frequency::Vector{Float64}   # the channel's band rate, Hz
     # ── Loop state ────────────────────────────────────────────────────────────
-    estimator::Vector{E}
+    loop_state::Vector{E}
     carrier_doppler::Vector{Float64}   # Hz, the loop's current command
     code_doppler::Vector{Float64}
     timeline::Vector{NCOTimeline}
-    # A word waiting for its device sample.
-    pending_word_sample::Vector{Int64}
+    # A command waiting for its device sample.
+    pending_command_sample::Vector{Int64}
     pending_carrier::Vector{Float64}
     pending_code::Vector{Float64}
-    # ── Record continuity and the block grid ──────────────────────────────────
+    # ── Record continuity and the code period grid ────────────────────────────
     last_record_end::Vector{Int64}
     last_record_samples::Vector{Int64}
     nominal_record_samples::Vector{Int64}
-    block_phase::Vector{Float64}
+    code_period_phase::Vector{Float64}
     primary_wraps::Vector{Int64}
     lost_record_samples::Vector{Int64}
     rearm_dead_samples::Vector{Int64}
     bit_clock_lost::Vector{Bool}
-    # ── The open record ───────────────────────────────────────────────────────
+    # ── The open predetection integration ─────────────────────────────────────
     partial_samples::Vector{Int64}
     partial_periods::Vector{Float64}
     partial_wraps::Vector{Int}
     partial_end::Vector{Int64}
-    partial_first::Vector{Bool}      # the open record is the first after the arm
+    partial_first::Vector{Bool}      # the open integration is the first after the arm
     partial_code_phase::Vector{Float64}  # the device's code phase at `partial_end`, NaN if unreported
-    pending_blocks::Vector{Int}      # blocks stepped since the bit buffer last advanced... (see fold)
-    # ── Secondary (overlay) code removal ──────────────────────────────────────
+    # ── Secondary code wipe-off ───────────────────────────────────────────────
     secondary_wipe::Vector{Bool}
-    secondary_phase::Vector{Int}
-    secondary_phase_sample::Vector{Int64}
+    secondary_code_phase::Vector{Int}
+    secondary_code_phase_sample::Vector{Int64}
     # ── Absolute code phase (pseudoranges) ────────────────────────────────────
     code_phase::Vector{Float64}      # chips, at `phase_ref_sample`
     phase_ref_sample::Vector{Int64}
     anchor_sample::Vector{Int64}
     anchor_code_phase::Vector{Float64}
     bit_phase_anchored::Vector{Bool}
-    carrier_phase::Vector{Float64}   # cycles, dead-reckoned from the words
+    carrier_phase::Vector{Float64}   # cycles, dead-reckoned from the commands
     # ── Bits ──────────────────────────────────────────────────────────────────
     bit_index::Vector{Int64}
     # ── Counters ──────────────────────────────────────────────────────────────
@@ -216,15 +216,15 @@ struct ChannelTable{E}
     stale_records::Vector{Int64}
 end
 
-function ChannelTable(n::Integer, estimator_template::E) where {E}
+function ChannelTable(n::Integer, loop_state_template::E) where {E}
     ChannelTable{E}(
         fill(false, n), fill(false, n), zeros(Int, n), ones(Int, n), zeros(Int, n), zeros(Int, n),
         [FixedName() for _ = 1:n], zeros(UInt64, n), fill(false, n), zeros(Int, n), zeros(Float64, n), fill(false, n), ones(Float64, n), zeros(Float64, n),
-        [estimator_template for _ = 1:n], zeros(Float64, n), zeros(Float64, n),
+        [loop_state_template for _ = 1:n], zeros(Float64, n), zeros(Float64, n),
         [NCOTimeline() for _ = 1:n], fill(typemin(Int64), n), zeros(Float64, n), zeros(Float64, n),
         fill(typemin(Int64), n), fill(typemin(Int64), n), fill(typemin(Int64), n), fill(NaN, n),
         zeros(Int64, n), zeros(Int64, n), zeros(Int64, n), fill(false, n),
-        zeros(Int64, n), zeros(Float64, n), zeros(Int, n), fill(typemin(Int64), n), fill(false, n), fill(NaN, n), zeros(Int, n),
+        zeros(Int64, n), zeros(Float64, n), zeros(Int, n), fill(typemin(Int64), n), fill(false, n), fill(NaN, n),
         fill(false, n), fill(-1, n), fill(typemin(Int64), n),
         zeros(Float64, n), fill(typemin(Int64), n), fill(typemin(Int64), n), fill(NaN, n), fill(false, n), zeros(Float64, n),
         zeros(Int64, n), zeros(Int64, n), zeros(Int64, n),
@@ -232,8 +232,8 @@ function ChannelTable(n::Integer, estimator_template::E) where {E}
 end
 
 """
-    LoopCore(driver, signals, segment; estimator = NCOReferencedPLLAndDLL(),
-             config = nothing, max_pending_records = 65536, num_ants = NumAnts(1))
+    LoopCore(driver, signals, segment; tracking_loop = DelayCompensatedTrackingLoop(),
+             config = nothing, max_pending_records = 65536, num_antennas = NumAntennas(1))
 
 The loop process's whole state: the driver, the signal banks, the channel
 table, the bands, the protocol segment it publishes into, the epoch clock and
@@ -242,44 +242,45 @@ the counters. `signals` is the tuple of signal objects this loop can track
 `segment` is the `HardwareLoopProtocol.Segment` the receiver attaches to, with
 one event ring per hardware channel of the driver.
 
-  - `estimator` — the `TrackingLoops` estimator every satellite channel steps:
-    any whose `step_loop` takes an NCO timeline and a landing sample, by default
-    the delay-aware `NCOReferencedPLLAndDLL`. With a `VectorPLLAndDLL` the core
-    runs vector tracking: every satellite shares the estimator's navigation
-    engine, the segment's `navigation_mode` is `NAV_VECTOR` and each navigation
-    cycle is published on the segment's nav ring. Its `inner` must be an
-    `NCOReferencedPLLAndDLL`, its `config` a `VectorTracking` (not `nothing`),
-    and it must list every signal of `signals` that carries data.
+  - `tracking_loop` — the `TrackingLoops` tracking loop every satellite channel
+    steps: any whose `step_loop!` takes an NCO timeline and an application
+    sample index, by default the `DelayCompensatedTrackingLoop`. With a
+    `VectorTrackingLoop` the core runs vector tracking: every satellite shares
+    the loop's navigation engine, the segment's `navigation_mode` is
+    `NAV_VECTOR` and each navigation cycle is published on the segment's nav
+    ring. Its `scalar_loop` must be a `DelayCompensatedTrackingLoop`, its
+    `filter_config` a `NavigationFilterConfig` (not `nothing`), and it must
+    list every signal of `signals` that carries data.
   - `config` — a [`LoopConfig`](@ref); by default one whose epoch is a primary
     code period of the first signal on the reference band.
   - `max_pending_records` — the capacity of the ingest buffers; records past it
     are dropped and counted.
-  - `num_ants` — the antenna blocks per record as a static `NumAnts`; must
-    match [`driver_capabilities`](@ref)`(driver).num_ants`.
+  - `num_antennas` — the antenna blocks per record as a static `NumAntennas`;
+    must match [`driver_capabilities`](@ref)`(driver).num_antennas`.
 
 Drive it with [`service_pass!`](@ref) or [`run!`](@ref).
 """
-mutable struct LoopCore{D<:AbstractLoopDriver,Banks<:Tuple,E<:AbstractDopplerEstimator,CT<:ChannelTable}
+mutable struct LoopCore{D<:AbstractLoopDriver,Banks<:Tuple,E<:AbstractTrackingLoop,CT<:ChannelTable}
     const driver::D
     const banks::Banks
     const channels::CT
     const bands::Vector{BandState}
     const segment::Segment
     const config::LoopConfig
-    const estimator::E
-    # Per bank, whether a vector-tracking estimator lists its signal: only those
+    const tracking_loop::E
+    # Per bank, whether a vector tracking loop lists its signal: only those
     # may be armed as drivers in vector mode.
     const vector_banks::Vector{Bool}
     const num_channels::Int
-    const num_ants::Int
+    const num_antennas::Int
     # Records read from the driver and not yet folded (they belong to an epoch
     # that has not closed). Sized once.
     const pending::Vector{DeviceRecord}
     const incoming::Vector{DeviceRecord}
     const max_pending::Int
-    # The epoch being folded: where its words land, and whether it is a stale
+    # The epoch being folded: where its NCO commands take effect, and whether it is a stale
     # backlog folded for observation only.
-    current_landing::Int64
+    application_sample_index::Int64
     observation_only::Bool
     # The epoch grid on the reference band's counter.
     next_epoch_boundary::Int64
@@ -298,19 +299,19 @@ mutable struct LoopCore{D<:AbstractLoopDriver,Banks<:Tuple,E<:AbstractDopplerEst
     rearm_gaps::Int64
     tap_layout_mismatches::Int64
     events_published::Int64
-    words_committed::Int64
-    words_late::Int64
-    words_rejected::Int64
+    nco_commands_committed::Int64
+    nco_commands_late::Int64
+    nco_commands_rejected::Int64
     max_pass_ns::Int64
     # Navigation (vector mode): the latest cycle published, how many nav events
     # were, and the longest pass that published a cycle (the cycle itself runs
-    # inside the `step_loop` of one record).
+    # inside the `step_loop!` of one predetection integration).
     last_nav_cycle::Int
     nav_events_published::Int64
     max_nav_cycle_ns::Int64
     # Record age at the fold — the device counter read at the start of the pass
-    # minus the newest record's end — is the record-to-word latency, since the
-    # words are committed in the same pass. Histogram over `LATENCY_EDGES_US`
+    # minus the newest record's end — is the record-to-command latency, since
+    # the NCO commands are committed in the same pass. Histogram over `LATENCY_EDGES_US`
     # (the last bin overflows) and the maximum, in microseconds.
     const latency_hist::Vector{Int64}
     max_record_age_us::Int64
@@ -330,12 +331,12 @@ function LoopCore(
     driver::AbstractLoopDriver,
     signals::Tuple{AbstractGNSSSignal,Vararg{AbstractGNSSSignal}},
     segment::Segment;
-    estimator::AbstractDopplerEstimator = NCOReferencedPLLAndDLL(),
+    tracking_loop::AbstractTrackingLoop = DelayCompensatedTrackingLoop(),
     config::Union{Nothing,LoopConfig} = nothing,
     max_pending_records::Integer = 1 << 16,
     # Antenna blocks per record, as a static count: the banks' correlator
     # types depend on it, and a trimmed binary needs them known at build time.
-    num_ants::NumAnts{N} = NumAnts(1),
+    num_antennas::NumAntennas{N} = NumAntennas(1),
 ) where {N}
     caps = driver_capabilities(driver)
     band_table(segment) == caps.bands || throw(ArgumentError(
@@ -348,21 +349,20 @@ function LoopCore(
         LoopConfig(;
             epoch_length = round(
                 Int64,
-                get_code_length(first(signals)) * reference.sampling_freq_hz /
-                ustrip(Hz, uconvert(Hz, get_code_frequency(first(signals)))),
+                get_code_length(first(signals)) * reference.sampling_freq_hz / _chip_rate_hz(first(signals)),
             ),
         ),
     )
-    caps.num_ants == N ||
-        throw(ArgumentError("the driver reads $(caps.num_ants) antenna block(s) per record but the core was built for $N"))
-    vector_banks = _check_estimator(estimator, signals)
-    banks = map(signal -> ChannelBank(signal, n, num_ants), signals)
-    template = init_estimator_state(estimator, first(signals), 0.0Hz, 0.0Hz)
+    caps.num_antennas == N ||
+        throw(ArgumentError("the driver reads $(caps.num_antennas) antenna block(s) per record but the core was built for $N"))
+    vector_banks = _check_tracking_loop(tracking_loop, signals)
+    banks = map(signal -> ChannelBank(signal, n, num_antennas), signals)
+    template = init_loop_state(tracking_loop, first(signals), 0.0Hz, 0.0Hz)
     pending = DeviceRecord[]
     sizehint!(pending, max_pending_records)
     incoming = DeviceRecord[]
     sizehint!(incoming, max_pending_records)
-    set_navigation_mode!(segment, _navigation_mode(estimator))
+    set_navigation_mode!(segment, _navigation_mode(tracking_loop))
     LoopCore(
         driver,
         banks,
@@ -370,10 +370,10 @@ function LoopCore(
         [BandState(entry, reference.sampling_freq_hz) for entry in caps.bands],
         segment,
         cfg,
-        estimator,
+        tracking_loop,
         vector_banks,
         n,
-        caps.num_ants,
+        caps.num_antennas,
         pending,
         incoming,
         Int(max_pending_records),
@@ -392,39 +392,39 @@ function LoopCore(
     )
 end
 
-# ── The estimator ────────────────────────────────────────────────────────────
+# ── The tracking loop ────────────────────────────────────────────────────────
 
-# Whether the core runs vector tracking: every satellite shares the estimator's
-# navigation engine, which the core publishes.
-_is_vector(::AbstractDopplerEstimator) = false
-_is_vector(::VectorPLLAndDLL) = true
-@inline _is_vector(core::LoopCore) = _is_vector(core.estimator)
+# Whether the core runs vector tracking: every satellite shares the tracking
+# loop's navigation engine, which the core publishes.
+_is_vector(::AbstractTrackingLoop) = false
+_is_vector(::VectorTrackingLoop) = true
+@inline _is_vector(core::LoopCore) = _is_vector(core.tracking_loop)
 
-_navigation_mode(estimator::AbstractDopplerEstimator) =
-    _is_vector(estimator) ? HardwareLoopProtocol.NAV_VECTOR : HardwareLoopProtocol.NAV_NONE
+_navigation_mode(tracking_loop::AbstractTrackingLoop) =
+    _is_vector(tracking_loop) ? HardwareLoopProtocol.NAV_VECTOR : HardwareLoopProtocol.NAV_NONE
 
-# Whether a vector-tracking estimator was built for `signal` as a driver, and
-# whether it decodes `signal` (a plain data signal, or a pilot's data component).
-_lists_signal(estimator::VectorPLLAndDLL, signal::AbstractGNSSSignal) =
-    any(group -> typeof(group.signal) === typeof(signal), estimator.navigation.groups)
-_decodes_signal(estimator::VectorPLLAndDLL, signal::AbstractGNSSSignal) =
-    any(group -> typeof(group.decoding_signal) === typeof(signal), estimator.navigation.groups)
+# Whether a vector tracking loop was built for `signal` as a driver, and whether
+# it decodes `signal` (a plain data signal, or a pilot's data component).
+_lists_signal(tracking_loop::VectorTrackingLoop, signal::AbstractGNSSSignal) =
+    any(pair -> typeof(first(pair)) === typeof(signal), get_signal_pairs(tracking_loop))
+_decodes_signal(tracking_loop::VectorTrackingLoop, signal::AbstractGNSSSignal) =
+    any(pair -> typeof(last(pair)) === typeof(signal), get_signal_pairs(tracking_loop))
 
-# Check the estimator against the core's signals, and return per bank whether
-# it may drive a satellite in vector mode.
-_check_estimator(::AbstractDopplerEstimator, signals::Tuple) = fill(false, length(signals))
-function _check_estimator(estimator::VectorPLLAndDLL, signals::Tuple)
-    estimator.inner isa NCOReferencedPLLAndDLL || throw(ArgumentError(
-        "vector tracking in the loop process needs the delay-aware loop as its inner estimator: " *
-        "`VectorPLLAndDLL(signals...; inner = NCOReferencedPLLAndDLL())`"))
-    estimator.navigation.enabled || throw(ArgumentError(
-        "a `VectorPLLAndDLL` built with `config = nothing` only solves a scalar PVT; " *
+# Check the tracking loop against the core's signals, and return per bank
+# whether it may drive a satellite in vector mode.
+_check_tracking_loop(::AbstractTrackingLoop, signals::Tuple) = fill(false, length(signals))
+function _check_tracking_loop(tracking_loop::VectorTrackingLoop, signals::Tuple)
+    get_scalar_loop(tracking_loop) isa DelayCompensatedTrackingLoop || throw(ArgumentError(
+        "vector tracking in the loop process needs the delay-compensated loop as its scalar loop: " *
+        "`VectorTrackingLoop(signals...; scalar_loop = DelayCompensatedTrackingLoop())`"))
+    is_vector_tracking_enabled(tracking_loop) || throw(ArgumentError(
+        "a `VectorTrackingLoop` built with `filter_config = nothing` only solves a scalar PVT; " *
         "the loop process runs either vector tracking or the scalar loops, which publish no PVT"))
-    listed = Bool[_lists_signal(estimator, signal) for signal in signals]
+    listed = Bool[_lists_signal(tracking_loop, signal) for signal in signals]
     for (signal, ok) in zip(signals, listed)
-        ok || iszero(get_data_frequency(signal)) || _decodes_signal(estimator, signal) ||
+        ok || iszero(get_bit_rate(signal)) || _decodes_signal(tracking_loop, signal) ||
             throw(ArgumentError(
-                "the vector-tracking estimator does not list $(nameof(typeof(signal))), " *
+                "the vector tracking loop does not list $(nameof(typeof(signal))), " *
                 "which the core can arm as a driver; build it with every data signal of " *
                 "the core, plain or as the data component of a `pilot => data` pair"))
     end

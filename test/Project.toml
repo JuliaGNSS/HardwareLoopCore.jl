@@ -15,13 +15,13 @@ Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 HardwareLoopCore = {path = ".."}
 
 [compat]
-Acquisition = "2"
-GNSSSignals = "4"
+Acquisition = "3"
+GNSSSignals = "5"
 HardwareLoopProtocol = "3"
 LinearAlgebra = "<0.0.1, 1"
 Random = "<0.0.1, 1"
 Scratch = "1"
 StaticArrays = "1"
 Test = "<0.0.1, 1"
-TrackingLoops = "5"
+TrackingLoops = "7"
 Unitful = "1"

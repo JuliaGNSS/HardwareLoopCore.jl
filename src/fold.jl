@@ -1,21 +1,23 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# The epoch fold: emitting a completed record into the loop, closing epochs,
-# scheduling and committing NCO words, keeping the absolute code phase, and
-# publishing everything the receiver needs to mirror the channel.
+# The epoch fold: emitting a completed predetection integration into the loop,
+# closing epochs, scheduling and committing NCO commands, keeping the absolute
+# code phase, and publishing everything the receiver needs to mirror the
+# channel.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# The device sample the words computed in this pass are predicted to land at,
-# on the reference counter: the word is written before the pass ends, so it is
-# the counter read at the start of the pass plus the configured lead — never
-# before the newest record seen. `commit_words!` corrects the timeline to the
-# sample the word really landed at.
-@inline function _landing_sample(core::LoopCore, boundary::Int64, now_reference::Int64)
+# The device sample the NCO commands computed in this pass are predicted to take
+# effect at, on the reference counter: a command is written before the pass
+# ends, so it is the counter read at the start of the pass plus the configured
+# lead — never before the newest record seen. `commit_nco_commands!` confirms
+# each command at the sample it really took effect at.
+@inline function _predict_application_sample(core::LoopCore, boundary::Int64, now_reference::Int64)
     max(now_reference, core.latest_sample_index) + core.config.commit_lead_samples
 end
 
-# The carrier-phase offset of the signal whose estimator steers the channel's
-# carrier: a passenger's bit-buffer prompt is de-rotated against its driver's
-# (the data half of a pilot/data pair may sit in quadrature to the pilot).
+# The carrier-phase offset (cycles) of the signal whose loop steers the
+# channel's carrier: a passenger's bit-synchronizer prompt is de-rotated against
+# its driver's (the data half of a pilot/data pair may sit in quadrature to the
+# pilot).
 @inline function _driver_carrier_phase_offset(core::LoopCore, ch::Int)
     T = core.channels
     driver = T.signal_index[ch] >= 2 ? T.driver_channel[ch] : 0
@@ -29,25 +31,25 @@ end
 # would report the offset here.
 @inline _band_sample_offset(::LoopCore, ::Int) = 0
 
-# The replica's code phase (chips) at `sample_end`, for the record handed to the
-# estimator: the device's own report of the record's last dump where it gives
-# one, else the core's absolute code phase advanced to `sample_end`. NaN when
-# neither is known — before the first device report, which a device that never
-# reports one leaves on records cut on the code-block grid, where an estimator
-# reads NaN as a phase on the block boundary.
-function _record_code_phase(core::LoopCore, signal, ch::Int, sample_end::Int64)
+# The replica's code phase (chips) at `sample_end`, for the integration handed
+# to the loop: the device's own report of the integration's last record where it
+# gives one, else the core's absolute code phase advanced to `sample_end`. NaN
+# when neither is known — before the first device report, which a device that
+# never reports one leaves on integrations cut on the code period grid, where a
+# tracking loop reads NaN as a phase on the code period boundary.
+function _integration_code_phase(core::LoopCore, signal, ch::Int, sample_end::Int64)
     T = core.channels
     reported = T.partial_code_phase[ch]
     isnan(reported) || return reported
     reference = T.phase_ref_sample[ch]
     reference == typemin(Int64) && return NaN
-    T.code_phase[ch] + (sample_end - reference) * _code_rate_hz(core, ch, signal) / T.sampling_freq[ch]
+    T.code_phase[ch] + (sample_end - reference) * _code_frequency_hz(core, ch, signal) / T.sampling_frequency[ch]
 end
 
-# The channel whose slot holds the estimator state of `ch`'s satellite: its own for
-# a driver, its driver channel's for a passenger, 0 for none (a noise reference, or
+# The channel whose slot holds the loop state of `ch`'s satellite: its own for a
+# driver, its driver channel's for a passenger, 0 for none (a noise reference, or
 # a passenger whose driver is not armed).
-@inline function _estimator_channel(core::LoopCore, ch::Int)
+@inline function _loop_state_channel(core::LoopCore, ch::Int)
     T = core.channels
     T.signal_index[ch] == 1 && return ch
     T.signal_index[ch] >= 2 || return 0
@@ -55,19 +57,21 @@ end
     driver != 0 && T.armed[driver] ? driver : 0
 end
 
-# Whether the overlay is off the record about to be folded. The device replicates
-# the primary code only and the core wipes the overlay chip once sync stands, so
-# a record before that is primary-only, as TrackingLoops takes a pre-sync record
-# of a dataless signal to be. A device that wipes the overlay itself
-# (`SECONDARY_WIPEOFF`, reserved) gets TrackingLoops' default: wiped once synced.
-@inline _is_overlay_wiped(core::LoopCore, ch::Int, state) =
+# Whether the secondary code is off the integration about to be processed. The
+# device replicates the primary code only and the core wipes the secondary chip
+# once sync stands, so an integration before that is primary-only, as
+# TrackingLoops takes a pre-sync integration of a dataless signal to be. A
+# device that wipes the secondary code itself (`SECONDARY_WIPEOFF`, reserved)
+# gets TrackingLoops' default: wiped once synced.
+@inline _is_secondary_code_wiped(core::LoopCore, ch::Int, state) =
     core.channels.secondary_wipe[ch] ? _is_secondary_code_removed(core, ch) :
-    has_bit_or_secondary_code_been_found(state)
+    is_bit_or_secondary_code_synced(state)
 
-# Hand the channel's part-accumulated record to the loop and start a fresh one.
-# This is where the estimator steps, the events are published and the word to
-# be scheduled is refreshed. A no-op when nothing is accumulated.
-function _emit_partial!(core::LoopCore, bank::ChannelBank, ch::Int)
+# Hand the channel's open predetection integration to the loop and start a
+# fresh one. This is where the tracking loop steps, the events are published and
+# the NCO command to be scheduled is refreshed. A no-op when nothing is
+# accumulated.
+function _emit_integration!(core::LoopCore, bank::ChannelBank, ch::Int)
     T = core.channels
     T.partial_samples[ch] == 0 && return nothing
     signal = bank.signal
@@ -75,15 +79,12 @@ function _emit_partial!(core::LoopCore, bank::ChannelBank, ch::Int)
     samples = T.partial_samples[ch]
     sample_end = T.partial_end[ch]
     correlator = _scale_accumulators(bank.partial[ch], T.scale[ch])
-    output = CorrelatorOutput(correlator, Int(samples), Int(sample_end), _record_code_phase(core, signal, ch, sample_end))
-    fs = T.sampling_freq[ch] * Hz
-    state = bank.states[ch]
-    blocks_before = state.bit_buffer.prompt_accumulator_integrated_code_blocks
-    bits_before = length(get_soft_bits(state))
-    found_before = has_bit_or_secondary_code_been_found(state)
+    output = CorrelatorOutput(correlator, Int(samples), Int(sample_end), _integration_code_phase(core, signal, ch, sample_end))
+    fs = T.sampling_frequency[ch] * Hz
+    offset = _band_sample_offset(core, T.band[ch])
     noise_density = _noise_density(bank.template, band.noise_density / Hz)
-    state, prompt, filtered, integrated_code_blocks = apply_record(
-        state,
+    state, integration = process_correlator_output!(
+        bank.states[ch],
         signal,
         T.prn[ch],
         output,
@@ -91,39 +92,41 @@ function _emit_partial!(core::LoopCore, bank::ChannelBank, ch::Int)
         noise_density,
         band.noise_density_ready,
         _driver_carrier_phase_offset(core, ch);
-        overlay_wiped = _is_overlay_wiped(core, ch, state),
+        secondary_code_wiped = _is_secondary_code_wiped(core, ch, bank.states[ch]),
+        sample_index_offset = offset,
     )
     bank.states[ch] = state
-    # The loop: every record of the satellite, the driver's and its passengers',
-    # steps the satellite's one estimator state — the one in its driver channel's
-    # slot — unless this epoch is being folded observation-only (a stale backlog),
-    # in which case the bits and the C/N₀ are kept current and the filter is left
-    # alone. A vector loop is stepped regardless: its navigation engine drops a
-    # satellite that goes two navigation cycles without a record and falls back
-    # once it starves. The record is built from the signal's state before its bits
-    # are published and drained below. A passenger's record returns the command in
-    # force; the satellite's word stays its driver's, which the passenger follows.
+    # The loop: every integration of the satellite, the driver's and its
+    # passengers', steps the satellite's one loop state — the one in its driver
+    # channel's slot — unless this epoch is being folded observation-only (a
+    # stale backlog), in which case the bits and the C/N₀ are kept current and
+    # the filter is left alone. A vector loop is stepped regardless: its
+    # navigation engine drops a satellite that goes two navigation cycles
+    # without an integration and falls back once it starves. The integration's
+    # soft bits are a view of the state's, so it is stepped before they are
+    # published and drained below. A passenger's integration returns the
+    # command in force; the satellite's command stays its driver's, which the
+    # passenger follows.
     flags = UInt32(0)
     band.noise_density_ready && (flags |= HardwareLoopProtocol.RECORD_HAS_CN0)
     _is_secondary_code_removed(core, ch) && (flags |= HardwareLoopProtocol.RECORD_OVERLAY_WIPED)
     T.partial_first[ch] && (flags |= HardwareLoopProtocol.RECORD_FIRST_AFTER_ARM)
     timeline = T.timeline[ch]
-    record_start = Int64(sample_end) - Int64(samples)
-    applied_carrier, applied_code = mean_nco_word(timeline, record_start, Int64(sample_end))
-    owner = _estimator_channel(core, ch)
+    integration_start = Int64(sample_end) - Int64(samples)
+    applied_carrier, applied_code = calc_mean_nco_command(timeline, integration_start, Int64(sample_end))
+    owner = _loop_state_channel(core, ch)
     if owner != 0 && (!core.observation_only || _is_vector(core))
-        offset = _band_sample_offset(core, T.band[ch])
-        record = LoopRecord(signal, filtered, output, state, fs; prn = T.prn[ch], sample_offset = offset)
-        landing = _to_band(core, T.band[ch], core.current_landing) + offset
-        est, carrier, code = step_loop(core.estimator, T.estimator[owner], record, timeline, landing)
-        T.estimator[owner] = est
+        application_sample_index = _to_band(core, T.band[ch], core.application_sample_index) + offset
+        loop_state, carrier, code =
+            step_loop!(core.tracking_loop, T.loop_state[owner], integration, timeline, application_sample_index)
+        T.loop_state[owner] = loop_state
         if owner == ch
             T.carrier_doppler[ch] = ustrip(Hz, uconvert(Hz, carrier))
             T.code_doppler[ch] = ustrip(Hz, uconvert(Hz, code))
-            T.word_dirty[ch] = true
+            T.command_dirty[ch] = true
         end
     end
-    # Publish the record, then any bits it completed.
+    # Publish the integration, then any bits it completed.
     ring = event_ring(core.segment, ch)
     tag = EventTag(
         HardwareLoopProtocol.EVENT_RECORD,
@@ -132,39 +135,46 @@ function _emit_partial!(core::LoopCore, bank::ChannelBank, ch::Int)
         band = T.band[ch],
         prn = T.prn[ch],
         signal_index = T.signal_index[ch],
-        num_taps = get_num_accumulators(bank.template),
+        num_taps = get_num_correlators(bank.template),
     )
     cn0 = band.noise_density_ready ? ustrip(Hz, Unitful.linear(estimate_cn0(state, samples / fs))) : 0.0
     publish!(
         ring,
         tag,
-        RecordEvent(prompt, Int64(samples), Int32(integrated_code_blocks), flags, cn0, applied_carrier, applied_code),
+        RecordEvent(
+            get_prompt(integration.filtered_correlator),
+            Int64(samples),
+            Int32(integration.num_code_periods),
+            flags,
+            cn0,
+            applied_carrier,
+            applied_code,
+        ),
     )
     core.events_published += 1
     if core.config.publish_taps || T.want_taps[ch]
         publish!(
             ring,
             EventTag(HardwareLoopProtocol.EVENT_TAPS, ch, sample_end; band = T.band[ch], prn = T.prn[ch],
-                     signal_index = T.signal_index[ch], num_taps = get_num_accumulators(bank.template)),
+                     signal_index = T.signal_index[ch], num_taps = get_num_correlators(bank.template)),
             TapsEvent(_pack_correlator_taps(correlator), Int64(samples)),
         )
         core.events_published += 1
     end
-    soft_bits = get_soft_bits(state)
-    @inbounds for i = (bits_before+1):length(soft_bits)
+    @inbounds for soft_bit in integration.new_soft_bits
         T.bit_index[ch] += 1
         publish!(
             ring,
             EventTag(HardwareLoopProtocol.EVENT_BIT, ch, sample_end; band = T.band[ch], prn = T.prn[ch],
                      signal_index = T.signal_index[ch]),
-            BitEvent(soft_bits[i], state.bit_buffer.polarity, T.bit_index[ch]),
+            BitEvent(soft_bit, integration.bit_polarity, T.bit_index[ch]),
         )
         core.events_published += 1
     end
     # The bits have been published; the vector is drained so it never grows.
-    isempty(soft_bits) || empty!(soft_bits)
-    # A post-sync record that overshot the bit boundary dropped sync; say so.
-    if found_before && !has_bit_or_secondary_code_been_found(state)
+    drain_soft_bits!(state)
+    # A post-sync integration that overshot the bit boundary dropped sync; say so.
+    if integration.sync_change == TrackingLoops.SYNC_LOST
         publish!(
             ring,
             EventTag(HardwareLoopProtocol.EVENT_STATUS, ch, sample_end; band = T.band[ch], prn = T.prn[ch]),
@@ -172,7 +182,7 @@ function _emit_partial!(core::LoopCore, bank::ChannelBank, ch::Int)
         )
         core.events_published += 1
         T.bit_phase_anchored[ch] = false
-        _forget_secondary_phase!(core, ch)
+        _forget_secondary_code_phase!(core, ch)
     end
     T.partial_samples[ch] = 0
     T.partial_periods[ch] = 0.0
@@ -190,7 +200,6 @@ end
 @inline _noise_density(::AbstractCorrelator{1}, density) = density
 @inline _noise_density(::AbstractCorrelator{M}, density) where {M} =
     SMatrix{M,M}(ntuple(i -> (i - 1) % (M + 1) == 0 ? density : zero(density), Val(M * M)))
-
 # The correlator's taps as the fixed tuple a `TapsEvent` carries.
 @inline function _pack_correlator_taps(correlator::AbstractCorrelator{1})
     acc = get_accumulators(correlator)
@@ -205,15 +214,15 @@ end
     end
 end
 
-# A lost record cut the bit clock: rebuild it from the signal. Runs after the
-# epoch's records so the records up to the hole were credited to the buffer
-# that was counting them.
+# A lost record cut the bit clock: restart the bit synchronizer. Runs after the
+# epoch's records so the records up to the hole were credited to the
+# synchronizer that was counting them.
 function _restart_lost_bit_clock!(bank::ChannelBank, core::LoopCore, ch::Int)
     T = core.channels
-    bank.states[ch] = restart_bit_clock(bank.states[ch])
+    bank.states[ch] = reset_sync!(bank.states[ch])
     T.bit_phase_anchored[ch] = false
     T.bit_index[ch] = 0
-    _forget_secondary_phase!(core, ch)
+    _forget_secondary_code_phase!(core, ch)
     publish!(
         event_ring(core.segment, ch),
         EventTag(HardwareLoopProtocol.EVENT_STATUS, ch, T.last_record_end[ch]; band = T.band[ch], prn = T.prn[ch]),
@@ -233,7 +242,7 @@ function _advance_code_phase!(bank::ChannelBank, core::LoopCore, ch::Int, epoch_
     T = core.channels
     signal = bank.signal
     code_length = get_code_length(signal)
-    chips_per_sample = _code_rate_hz(core, ch, signal) / T.sampling_freq[ch]
+    chips_per_sample = _code_frequency_hz(core, ch, signal) / T.sampling_frequency[ch]
     boundary = _to_band(core, T.band[ch], epoch_boundary)
     reference = T.phase_ref_sample[ch]
     anchor = T.anchor_sample[ch]
@@ -250,46 +259,37 @@ function _advance_code_phase!(bank::ChannelBank, core::LoopCore, ch::Int, epoch_
         return nothing
     end
     state = bank.states[ch]
-    # Post-sync the phase wraps at the symbol (the data bit for a data signal,
-    # the secondary code for a pilot); before that at the primary code.
-    wrap = has_bit_or_secondary_code_been_found(state) ? _post_sync_code_length(signal) : code_length
+    # Post-sync the phase wraps at the data bit for a data signal, at the
+    # secondary code for a pilot; before that at the primary code.
+    wrap = is_bit_or_secondary_code_synced(state) ? _post_sync_code_length(signal) : code_length
     T.code_phase[ch] = mod(code_phase, wrap)
     T.phase_ref_sample[ch] = boundary
     nothing
 end
 
-@inline function _post_sync_code_length(signal::AbstractGNSSSignal)
-    primary = get_code_length(signal)
-    secondary = get_secondary_code_length(signal)
-    data_frequency = get_data_frequency(signal)
-    if iszero(data_frequency)
-        primary * secondary
-    else
-        blocks_per_bit = Int(get_code_frequency(signal) / (primary * data_frequency))
-        primary * max(secondary, blocks_per_bit)
-    end
-end
+@inline _post_sync_code_length(signal::AbstractGNSSSignal) =
+    get_code_length(signal) * max(get_secondary_code_length(signal), get_code_periods_per_bit(signal))
 
-# Tie a newly synchronised data signal's integer code-period count to its bit
-# buffer, once per assignment, after the epoch's records have been folded.
+# Tie a newly synchronised data signal's integer code period count to its bit
+# synchronizer, once per assignment, after the epoch's records have been folded.
 function _anchor_bit_phase!(bank::ChannelBank, core::LoopCore, ch::Int, epoch_boundary::Int64)
     T = core.channels
     T.bit_phase_anchored[ch] && return nothing
     signal = bank.signal
     get_secondary_code_length(signal) == 1 || return nothing
-    iszero(get_data_frequency(signal)) && return nothing
+    iszero(get_bit_rate(signal)) && return nothing
     state = bank.states[ch]
-    has_bit_or_secondary_code_been_found(state) || return nothing
+    is_bit_or_secondary_code_synced(state) || return nothing
     boundary = _to_band(core, T.band[ch], epoch_boundary)
     T.phase_ref_sample[ch] == boundary || return nothing
     last = T.last_record_end[ch]
     last == typemin(Int64) && return nothing
     primary = get_code_length(signal)
-    rate = _code_rate_hz(core, ch, signal) / T.sampling_freq[ch]
+    rate = _code_frequency_hz(core, ch, signal) / T.sampling_frequency[ch]
     elapsed = (boundary - last) * rate
     residual = rem(T.code_phase[ch] - elapsed, primary, RoundNearest)
     T.code_phase[ch] =
-        state.bit_buffer.prompt_accumulator_integrated_code_blocks * primary + residual + elapsed
+        get_num_code_periods_into_bit(state) * primary + residual + elapsed
     T.bit_phase_anchored[ch] = true
     nothing
 end
@@ -300,17 +300,16 @@ function _publish_epoch_state!(bank::ChannelBank, core::LoopCore, ch::Int, epoch
     T = core.channels
     state = bank.states[ch]
     band = core.bands[T.band[ch]]
-    fs = T.sampling_freq[ch] * Hz
-    bb = state.bit_buffer
+    fs = T.sampling_frequency[ch] * Hz
     flags = UInt8(0)
-    has_bit_or_secondary_code_been_found(state) && (flags |= HardwareLoopProtocol.STATE_SYNC_FOUND)
+    is_bit_or_secondary_code_synced(state) && (flags |= HardwareLoopProtocol.STATE_SYNC_FOUND)
     T.bit_phase_anchored[ch] && (flags |= HardwareLoopProtocol.STATE_BIT_PHASE_ANCHORED)
     T.phase_ref_sample[ch] != typemin(Int64) && (flags |= HardwareLoopProtocol.STATE_CODE_PHASE_ANCHORED)
     core.observation_only && (flags |= HardwareLoopProtocol.STATE_OBSERVATION_ONLY)
     boundary = _to_band(core, T.band[ch], epoch_boundary)
-    nco_carrier, nco_code = nco_word_at(T.timeline[ch], boundary)
+    nco_carrier, nco_code = get_nco_command(T.timeline[ch], boundary)
     cn0 = band.noise_density_ready ?
-        ustrip(Hz, Unitful.linear(estimate_cn0(state, state.last_num_code_blocks * _code_period_seconds(bank.signal)))) : 0.0
+        ustrip(Hz, Unitful.linear(estimate_cn0(state, get_last_num_code_periods(state) * _code_period_seconds(bank.signal)))) : 0.0
     ev = EpochStateEvent(
         T.carrier_doppler[ch],
         T.code_doppler[ch],
@@ -319,10 +318,10 @@ function _publish_epoch_state!(bank::ChannelBank, core::LoopCore, ch::Int, epoch
         cn0,
         nco_carrier,
         nco_code,
-        _to_band(core, T.band[ch], core.current_landing),
-        Int32(bb.prompt_accumulator_integrated_code_blocks),
-        Int16(bb.secondary_phase),
-        bb.polarity,
+        _to_band(core, T.band[ch], core.application_sample_index),
+        Int32(get_num_code_periods_into_bit(state)),
+        Int16(get_secondary_code_phase(state)),
+        get_bit_polarity(state),
         flags,
     )
     tag = EventTag(HardwareLoopProtocol.EVENT_EPOCH_STATE, ch, boundary; band = T.band[ch], prn = T.prn[ch],
@@ -333,90 +332,93 @@ function _publish_epoch_state!(bank::ChannelBank, core::LoopCore, ch::Int, epoch
     nothing
 end
 
-# ── Words ────────────────────────────────────────────────────────────────────
+# ── NCO commands ─────────────────────────────────────────────────────────────
 
-# Schedule the epoch's word for every driver channel whose loop stepped, at the
-# epoch's landing sample on the channel's band counter, and enter it in the
-# timeline. Passenger channels share their satellite's word: the receiver's
-# arm carries the driver channel they follow.
-function _schedule_words!(core::LoopCore)
+# Schedule the epoch's NCO command for every driver channel whose loop stepped,
+# at the epoch's application sample on the channel's band counter, and enter it
+# in the timeline. Passenger channels share their satellite's command: the
+# receiver's arm carries the driver channel they follow. A command the timeline
+# has no room for is not written.
+function _schedule_nco_commands!(core::LoopCore)
     T = core.channels
     for ch = 1:core.num_channels
         T.armed[ch] && T.confirmed[ch] || continue
         T.signal_index[ch] == 0 && continue
-        T.word_dirty[ch] || continue
-        T.word_dirty[ch] = false
+        T.command_dirty[ch] || continue
+        T.command_dirty[ch] = false
         source = T.signal_index[ch] == 1 ? ch : T.driver_channel[ch]
         source == 0 && continue
         carrier = T.carrier_doppler[source]
         code = T.code_doppler[source]
-        landing = _to_band(core, T.band[ch], core.current_landing)
-        if !(isfinite(carrier) && isfinite(code))
-            core.words_rejected += 1
+        application_sample_index = _to_band(core, T.band[ch], core.application_sample_index)
+        if !(isfinite(carrier) && isfinite(code)) ||
+           !schedule_command!(T.timeline[ch], application_sample_index, carrier, code)
+            core.nco_commands_rejected += 1
             continue
         end
-        T.pending_word_sample[ch] = landing
+        T.pending_command_sample[ch] = application_sample_index
         T.pending_carrier[ch] = carrier
         T.pending_code[ch] = code
-        schedule_word!(T.timeline[ch], landing, carrier, code)
     end
     nothing
 end
 
 # A passenger follows its driver's Dopplers.
-function _propagate_passenger_words!(core::LoopCore)
+function _propagate_passenger_commands!(core::LoopCore)
     T = core.channels
     for ch = 1:core.num_channels
         T.armed[ch] && T.signal_index[ch] >= 2 || continue
         source = T.driver_channel[ch]
         (source == 0 || !T.armed[source]) && continue
-        if T.word_dirty[source]
+        if T.command_dirty[source]
             T.carrier_doppler[ch] = T.carrier_doppler[source]
             T.code_doppler[ch] = T.code_doppler[source]
-            T.word_dirty[ch] = true
+            T.command_dirty[ch] = true
         end
     end
     nothing
 end
 
 """
-    commit_words!(core) -> Int
+    commit_nco_commands!(core) -> Int
 
-Write every word the fold scheduled, right now, and return how many were
-committed. The device applies a word on the sample after the write, so the
-sample counter read straight after it is where the word landed; the channel's
-timeline is corrected from the predicted landing to that sample, and a word
-landing more than an epoch past its prediction is counted late.
+Write every NCO command the fold scheduled, right now, and return how many were
+committed. The device applies a command on the sample after the write, so the
+sample counter read straight after it is where the command took effect; the
+channel's timeline confirms it at that sample, and a command taking effect
+more than an epoch past its prediction is counted late. A command the device
+refuses is cancelled from the timeline.
 """
-function commit_words!(core::LoopCore)
+function commit_nco_commands!(core::LoopCore)
     T = core.channels
     committed = 0
     for ch = 1:core.num_channels
         T.armed[ch] || continue
-        due = T.pending_word_sample[ch]
+        due = T.pending_command_sample[ch]
         due == typemin(Int64) && continue
-        T.pending_word_sample[ch] = typemin(Int64)
-        if write_word!(core.driver, ch, T.pending_carrier[ch], T.pending_code[ch])
+        T.pending_command_sample[ch] = typemin(Int64)
+        if write_nco_command!(core.driver, ch, T.pending_carrier[ch], T.pending_code[ch])
             committed += 1
-            core.words_committed += 1
+            core.nco_commands_committed += 1
             actual = sample_count(core.driver, T.band[ch])
-            actual == due || reschedule_word!(T.timeline[ch], due, actual)
-            actual - due > core.config.epoch_length && (core.words_late += 1)
+            confirm_command!(T.timeline[ch], due, actual)
+            actual - due > core.config.epoch_length && (core.nco_commands_late += 1)
         else
-            core.words_rejected += 1
+            cancel_command!(T.timeline[ch], due)
+            core.nco_commands_rejected += 1
         end
     end
     committed
 end
 
-# Fold each channel's timeline forward over the words its folded records ran on.
-function _promote_applied_words!(core::LoopCore)
+# Advance each channel's timeline over the commands its folded records ran on.
+function _advance_timelines!(core::LoopCore)
     T = core.channels
     for ch = 1:core.num_channels
         T.armed[ch] || continue
         last_end = T.last_record_end[ch]
         last_end == typemin(Int64) && continue
-        promote_words!(T.timeline[ch], last_end - T.last_record_samples[ch])
+        advance_timeline!(T.timeline[ch], last_end - T.last_record_samples[ch])
     end
     nothing
 end
@@ -510,9 +512,10 @@ end
     fold_closed_epochs!(core, now_reference) -> Int
 
 Fold every epoch that has closed — every record before the boundary is
-ingested, each channel's completed records step the loop, the code phases are
-advanced to the boundary, the noise references close their epoch, the epoch
-states are published and the words are scheduled — and return how many.
+ingested, each channel's completed predetection integrations step the loop,
+the code phases are advanced to the boundary, the noise references close their
+epoch, the epoch states are published and the NCO commands are scheduled — and
+return how many.
 `now_reference` is the device counter on the reference band at the start of
 this pass; an epoch more than `max_backlog_epochs` behind it is folded
 observation-only.
@@ -523,7 +526,7 @@ function fold_closed_epochs!(core::LoopCore, now_reference::Int64)
     folds = 0
     while core.latest_sample_index >= core.next_epoch_boundary
         boundary = core.next_epoch_boundary
-        core.current_landing = _landing_sample(core, boundary, now_reference)
+        core.application_sample_index = _predict_application_sample(core, boundary, now_reference)
         core.observation_only = now_reference - boundary > core.config.max_backlog_epochs * epoch
         core.observation_only && (core.skipped_epochs += 1)
         # Ingest, in arrival order, every pending record that ended before the
@@ -556,16 +559,16 @@ function fold_closed_epochs!(core::LoopCore, now_reference::Int64)
             if core.channels.signal_index[ch] == 1
                 with_bank(_anchor_bit_phase!, core, ch, core, ch, boundary)
             end
-            with_bank((bank, core, ch) -> _anchor_secondary_phase!(core, bank, ch), core, ch, core, ch)
+            with_bank((bank, core, ch) -> _anchor_secondary_code_phase!(core, bank, ch), core, ch, core, ch)
             with_bank(_publish_epoch_state!, core, ch, core, ch, boundary)
         end
         for band_index in eachindex(core.bands)
             _close_noise_epoch!(core, band_index)
         end
-        _propagate_passenger_words!(core)
-        _schedule_words!(core)
-        _promote_applied_words!(core)
-        _publish_navigation!(core, core.estimator)
+        _propagate_passenger_commands!(core)
+        _schedule_nco_commands!(core)
+        _advance_timelines!(core)
+        _publish_navigation!(core, core.tracking_loop)
         core.next_epoch_boundary = boundary + epoch
         core.epochs_folded += 1
         folds += 1
