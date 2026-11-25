@@ -80,7 +80,8 @@ function _clear_channel!(core::LoopCore, ch::Int)
     T.reported_code_phase_sample_index[ch] = typemin(Int64)
     T.reported_code_phase[ch] = NaN
     T.bit_edge_known[ch] = false
-    T.carrier_phase[ch] = 0.0
+    T.accumulated_replica_carrier_phase[ch] = 0.0
+    T.accumulated_replica_carrier_phase_sample_index[ch] = typemin(Int64)
     T.bit_index[ch] = 0
     T.records_ingested[ch] = 0
     T.stale_records[ch] = 0

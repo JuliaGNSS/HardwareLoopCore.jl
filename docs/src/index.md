@@ -97,6 +97,9 @@ Current limitations:
 - C/N₀ needs a noise reference: one hardware channel per band armed on a
   noise probe, whose records fill TrackingLoops' `CorrelatorNoiseDensityEstimator`
   window (one second). Without one, no C/N₀ is published.
+- The loop state's accumulated carrier phase restarts at zero on every arm. The
+  core detects no cycle slips and publishes no loss-of-lock indicator: the
+  protocol has no flag for phase lock.
 - [`overflowed_channels!`](@ref) is part of the driver API but the core does
   not read it yet. Lost records are detected from gaps in each channel's
   records instead.

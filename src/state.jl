@@ -194,7 +194,10 @@ struct ChannelTable{E}
     reported_code_phase_sample_index::Vector{Int64}
     reported_code_phase::Vector{Float64}
     bit_edge_known::Vector{Bool}
-    carrier_phase::Vector{Float64}   # cycles, dead-reckoned from the commands
+    # The replica's carrier phase in cycles, unfolded: the carrier Doppler of the
+    # NCO timeline accumulated from the arm up to the sample index after it.
+    accumulated_replica_carrier_phase::Vector{Float64}
+    accumulated_replica_carrier_phase_sample_index::Vector{Int64}
     # ── Bits ──────────────────────────────────────────────────────────────────
     bit_index::Vector{Int64}
     # ── Counters ──────────────────────────────────────────────────────────────
@@ -213,6 +216,7 @@ function ChannelTable(n::Integer, loop_state_template::E) where {E}
         zeros(Int64, n), zeros(Float64, n), zeros(Int, n), fill(typemin(Int64), n), fill(false, n), fill(NaN, n),
         fill(false, n), fill(-1, n), fill(typemin(Int64), n),
         zeros(Float64, n), fill(typemin(Int64), n), fill(typemin(Int64), n), fill(NaN, n), fill(false, n), zeros(Float64, n),
+        fill(typemin(Int64), n),
         zeros(Int64, n), zeros(Int64, n), zeros(Int64, n),
     )
 end

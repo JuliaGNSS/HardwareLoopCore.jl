@@ -59,6 +59,11 @@ the records the core publishes.
   at the latest NCO update boundary, counted from the last bit edge (or secondary
   code start) once the bit edge is known, and pinned to the device's reported code
   phase where the device gives one.
+- **Accumulated carrier phase**: the replica's carrier phase in cycles, the
+  carrier Doppler accumulated over a channel's NCO commands since the arm,
+  unfolded, plus TrackingLoops' `calc_carrier_phase_correction` while the vector
+  loop steers the channel: the carrier-phase measurement (RINEX `L`). Not
+  Tracking.jl's replica carrier phase, which is folded to `[-0.5, 0.5)`.
 - **Noise probe**: the PRN, code phase and carrier a noise reference replicates,
   drawn by TrackingLoops; the core re-arms the noise reference onto a new probe every
   `noise_rearm_nco_updates` NCO updates.

@@ -322,11 +322,12 @@ function _publish_loop_state!(bank::ChannelBank, core::LoopCore, ch::Int, nco_up
     boundary = _to_band(core, T.band[ch], nco_update_boundary)
     nco_command = get_nco_command(T.nco_timeline[ch], boundary)
     cn0 = last(_noise_density_and_ready(band)) ? _dbhz(estimate_cn0(state)) : -Inf
+    _accumulate_replica_carrier_phase!(core, ch, boundary)
     ev = LoopStateEvent(
         T.carrier_doppler[ch],
         T.code_doppler[ch],
         T.code_phase[ch],
-        T.carrier_phase[ch],
+        T.accumulated_replica_carrier_phase[ch] + _carrier_phase_correction(core, ch, boundary),
         cn0,
         ustrip(Hz, nco_command.carrier_doppler),
         ustrip(Hz, nco_command.code_doppler),
@@ -342,6 +343,43 @@ function _publish_loop_state!(bank::ChannelBank, core::LoopCore, ch::Int, nco_up
     write_snapshot!(snapshot_slot(core.segment, ch), tag, ev)
     core.events_published += 1
     nothing
+end
+
+# Accumulate the replica's carrier phase up to `sample_index` on the channel's
+# band counter: the carrier Doppler of the NCO timeline from where it was last
+# accumulated to, or from the sample the device started the channel at, where
+# the replica's phase is zero. Runs before the timeline is advanced past the
+# span, so the commands it integrates are still in it.
+function _accumulate_replica_carrier_phase!(core::LoopCore, ch::Int, sample_index::Int64)
+    T = core.channels
+    from = T.accumulated_replica_carrier_phase_sample_index[ch]
+    if from == typemin(Int64)
+        from = assignment_start(core.driver, ch)
+        from == typemax(Int64) && return nothing
+    end
+    sample_index > from || return nothing
+    command = calc_mean_nco_command(T.nco_timeline[ch], from, sample_index)
+    T.accumulated_replica_carrier_phase[ch] +=
+        ustrip(Hz, command.carrier_doppler) * (sample_index - from) / T.sampling_frequency[ch]
+    T.accumulated_replica_carrier_phase_sample_index[ch] = sample_index
+    nothing
+end
+
+# What the tracking loop adds to the replica's carrier phase for its estimate of
+# the incoming carrier, TrackingLoops' `calc_carrier_phase_correction`: zero for
+# the scalar loops and out of the vector loop; in it, the residual PLL's
+# prediction, as the navigation filter sets the carrier NCO without steering it
+# onto the carrier. A passenger reads its driver's.
+function _carrier_phase_correction(core::LoopCore, ch::Int, boundary::Int64)
+    T = core.channels
+    owner = _loop_state_channel(core, ch)
+    owner == 0 && return 0.0
+    TrackingLoops.calc_carrier_phase_correction(
+        T.loop_state[owner],
+        T.nco_timeline[ch],
+        boundary + _sample_index_offset(core, T.band[ch]),
+        T.sampling_frequency[ch] * Hz,
+    )
 end
 
 # ── NCO commands ─────────────────────────────────────────────────────────────
